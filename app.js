@@ -577,10 +577,6 @@ function splitDictationTokens(rawText) {
   return tokens;
 }
 
-function countDictationTokens(rawText) {
-  return splitDictationTokens(rawText).length;
-}
-
 function deriveIncrementFromFinal(previousRaw, currentRaw) {
   const prevTokens = splitDictationTokens(previousRaw);
   const currTokens = splitDictationTokens(currentRaw);
@@ -592,25 +588,29 @@ function deriveIncrementFromFinal(previousRaw, currentRaw) {
     return currTokens.map((t) => t.raw).join(" ").trim();
   }
 
-  let commonPrefix = 0;
-  const maxPrefix = Math.min(prevTokens.length, currTokens.length);
-  while (commonPrefix < maxPrefix) {
-    if (prevTokens[commonPrefix].norm !== currTokens[commonPrefix].norm) {
-      break;
-    }
-    commonPrefix += 1;
+  const prevNorm = prevTokens.map((t) => t.norm);
+  const currNorm = currTokens.map((t) => t.norm);
+
+  if (prevNorm.join(" ") === currNorm.join(" ")) {
+    return "";
   }
 
-  if (commonPrefix > 0) {
-    return currTokens.slice(commonPrefix).map((t) => t.raw).join(" ").trim();
+  let prefix = 0;
+  const maxPrefix = Math.min(prevNorm.length, currNorm.length);
+  while (prefix < maxPrefix && prevNorm[prefix] === currNorm[prefix]) {
+    prefix += 1;
+  }
+
+  if (prefix > 0 && currNorm.length >= prevNorm.length) {
+    return currTokens.slice(prefix).map((t) => t.raw).join(" ").trim();
   }
 
   let overlap = 0;
-  const maxOverlap = Math.min(60, prevTokens.length, currTokens.length);
+  const maxOverlap = Math.min(60, prevNorm.length, currNorm.length);
   for (let size = maxOverlap; size >= 1; size -= 1) {
     let same = true;
     for (let j = 0; j < size; j += 1) {
-      if (prevTokens[prevTokens.length - size + j].norm !== currTokens[j].norm) {
+      if (prevNorm[prevNorm.length - size + j] !== currNorm[j]) {
         same = false;
         break;
       }
@@ -751,9 +751,9 @@ function initDictationSupport() {
   };
 
   dictationRecognition.onresult = (event) => {
-    const finalCandidates = [];
+    let handledFinal = 0;
     const interimChunks = [];
-    for (let i = 0; i < event.results.length; i += 1) {
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       const piece = result?.[0]?.transcript?.trim() || "";
       if (!piece) {
@@ -761,41 +761,37 @@ function initDictationSupport() {
       }
 
       if (result.isFinal) {
-        finalCandidates.push({ idx: i, piece });
+        handledFinal += 1;
+        const normalized = normalizeDictationText(piece);
+        const lastNormalized = normalizeDictationText(dictationLastFinalRaw);
+
+        if (!normalized) {
+          pushDictationDebug("final-skip", `idx=${i} empty-normalized`);
+          continue;
+        }
+        if (normalized === lastNormalized) {
+          pushDictationDebug("final-skip", `idx=${i} same-final`);
+          continue;
+        }
+
+        let incremental = deriveIncrementFromFinal(dictationLastFinalRaw, piece);
+        if (!incremental && normalized !== lastNormalized) {
+          incremental = piece;
+        }
+
+        const outcome = appendDictatedTextUnique(incremental);
+        pushDictationDebug(
+          "final",
+          `idx=${i} inc="${(incremental || "").slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${piece.slice(0, 80)}"`
+        );
+
+        dictationLastFinalRaw = piece;
       } else {
         interimChunks.push(piece);
       }
     }
 
-    if (finalCandidates.length > 0) {
-      let best = finalCandidates[0];
-      let bestTokens = countDictationTokens(best.piece);
-      for (let i = 1; i < finalCandidates.length; i += 1) {
-        const candidate = finalCandidates[i];
-        const candidateTokens = countDictationTokens(candidate.piece);
-        if (candidateTokens > bestTokens || (candidateTokens === bestTokens && candidate.piece.length > best.piece.length)) {
-          best = candidate;
-          bestTokens = candidateTokens;
-        }
-      }
-
-      const bestNormalized = normalizeDictationText(best.piece);
-      const lastNormalized = normalizeDictationText(dictationLastFinalRaw);
-
-      if (!bestNormalized) {
-        pushDictationDebug("final-skip", `idx=${best.idx} empty-normalized`);
-      } else if (bestNormalized === lastNormalized) {
-        pushDictationDebug("final-skip", `idx=${best.idx} same-final`);
-      } else {
-        const incremental = deriveIncrementFromFinal(dictationLastFinalRaw, best.piece);
-        const outcome = appendDictatedTextUnique(incremental);
-        pushDictationDebug(
-          "final",
-          `idx=${best.idx} inc="${incremental.slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${best.piece.slice(0, 80)}"`
-        );
-      }
-
-      dictationLastFinalRaw = best.piece;
+    if (handledFinal > 0) {
       renderDictationState();
       return;
     }
