@@ -1,4 +1,4 @@
-﻿const CACHE_NAME = "appunti-pwa-v14";
+const CACHE_NAME = "appunti-pwa-v16";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -49,6 +49,7 @@ self.addEventListener("fetch", (event) => {
     })
   );
 });
+
 
 
 

@@ -164,7 +164,10 @@ function bindEvents() {
   on(dateToInput, "change", resetPaginationAndRender);
   on(unlockSearchBtn, "click", unlockEncryptedSearch);
   on(lockSearchBtn, "click", lockEncryptedSearch);
-  on(hideEncryptedNotesCheckbox, "change", resetPaginationAndRender);
+  on(hideEncryptedNotesCheckbox, "change", () => {
+    renderLabels();
+    resetPaginationAndRender();
+  });
 
   on(clearFiltersBtn, "click", () => {
     searchInput.value = "";
@@ -243,12 +246,13 @@ function updateEncryptionVisibilityControl() {
     return;
   }
 
-  const visible = Boolean(sessionPassphrase);
-  encryptedVisibilityWrap.classList.toggle("hidden", !visible);
+  const unlocked = Boolean(sessionPassphrase);
+  hideEncryptedNotesCheckbox.disabled = !unlocked;
+  encryptedVisibilityWrap.classList.toggle("hidden", !unlocked);
+  encryptedVisibilityWrap.title = unlocked ? "" : "Il filtro torna disponibile dopo avere inserito la passphrase";
 
-  if (!visible) {
-    hideEncryptedNotesCheckbox.checked = false;
-  }
+  renderLabels();
+  resetPaginationAndRender();
 }
 
 function renderEncryptedSearchMeta() {
@@ -391,8 +395,25 @@ function renderLabels() {
   allLabelsBox.innerHTML = "";
   quickLabelsBox.innerHTML = "";
   searchLabelsBox.innerHTML = "";
+  const hideProtected = shouldHideProtectedItems();
+
+  if (hideProtected) {
+    Array.from(selectedNewLabelIds).forEach((id) => {
+      if (protectedLabelIds.has(id)) {
+        selectedNewLabelIds.delete(id);
+      }
+    });
+    Array.from(searchLabelIds).forEach((id) => {
+      if (protectedLabelIds.has(id)) {
+        searchLabelIds.delete(id);
+      }
+    });
+  }
 
   labels.forEach((label) => {
+    if (hideProtected && protectedLabelIds.has(label.id)) {
+      return;
+    }
     allLabelsBox.append(buildManageLabelRow(label));
     quickLabelsBox.append(buildChip(label, selectedNewLabelIds.has(label.id), "new-note"));
     searchLabelsBox.append(buildChip(label, searchLabelIds.has(label.id), "search"));
@@ -544,15 +565,23 @@ function resetPaginationAndRender() {
   renderNotes();
 }
 
+function noteHasProtectedLabel(note) {
+  return (note.labelIds || []).some((id) => protectedLabelIds.has(id));
+}
+
+function shouldHideProtectedItems() {
+  return Boolean(hideEncryptedNotesCheckbox?.checked);
+}
+
 function getFilteredNotes() {
   const textQuery = searchInput.value.trim().toLowerCase();
   const dateFrom = dateFromInput.value ? new Date(`${dateFromInput.value}T00:00:00`).getTime() : null;
   const dateTo = dateToInput.value ? new Date(`${dateToInput.value}T23:59:59`).getTime() : null;
-  const hideEncrypted = Boolean(hideEncryptedNotesCheckbox?.checked);
+  const hideProtected = shouldHideProtectedItems();
 
   return notes
     .filter((note) => {
-      if (hideEncrypted && note.encrypted) {
+      if (hideProtected && (note.encrypted || noteHasProtectedLabel(note))) {
         return false;
       }
 
@@ -681,10 +710,14 @@ function renderNoteItem(note) {
 
   noteMeta.textContent = buildMetaText(note);
 
+  const hideProtected = shouldHideProtectedItems();
   (note.labelIds || [])
     .map((labelId) => labels.find((entry) => entry.id === labelId))
     .filter(Boolean)
     .forEach((label) => {
+      if (hideProtected && protectedLabelIds.has(label.id)) {
+        return;
+      }
       const badge = document.createElement("span");
       badge.className = "tag";
       badge.textContent = `#${label.name}`;
