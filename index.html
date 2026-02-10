@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v16</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v17</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -143,6 +143,10 @@
           <button id="dictate-btn" class="btn ghost" type="button">Detta</button>
         </div>
         <p id="dictation-meta" class="hint">Dettatura non attiva.</p>
+        <details id="dictation-debug-panel" class="dictation-debug top-space">
+          <summary>Debug dettatura</summary>
+          <pre id="dictation-debug-log" class="dictation-debug-log">Nessun evento.</pre>
+        </details>
         <div id="quick-labels" class="row wrap gap top-space"></div>
       </section>
 

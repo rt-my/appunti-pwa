@@ -58,6 +58,7 @@ const noteInput = document.getElementById("note-input");
 const addNoteBtn = document.getElementById("add-note-btn");
 const dictateBtn = document.getElementById("dictate-btn");
 const dictationMeta = document.getElementById("dictation-meta");
+const dictationDebugLog = document.getElementById("dictation-debug-log");
 const labelInput = document.getElementById("label-input");
 const addLabelBtn = document.getElementById("add-label-btn");
 const sessionPassphraseBtn = document.getElementById("session-passphrase-btn");
@@ -102,6 +103,9 @@ let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
 const dictationFinalByResultIndex = new Map();
 const dictationRecentSegments = [];
+const dictationDebugEntries = [];
+let dictationRestartAttempt = 0;
+let dictationRestartFailures = 0;
 const decryptedSearchIndex = new Map();
 const decryptedNoteTextIndex = new Map();
 
@@ -527,6 +531,21 @@ function renderDictationState(message = "") {
   }
 }
 
+function pushDictationDebug(eventName, details = "") {
+  if (!dictationDebugLog) {
+    return;
+  }
+  const stamp = new Date().toLocaleTimeString("it-IT", { hour12: false });
+  const detailText = `${details}`.trim();
+  const line = detailText ? `[${stamp}] ${eventName} | ${detailText}` : `[${stamp}] ${eventName}`;
+  dictationDebugEntries.push(line);
+  if (dictationDebugEntries.length > 80) {
+    dictationDebugEntries.shift();
+  }
+  dictationDebugLog.textContent = dictationDebugEntries.join("\n");
+  dictationDebugLog.scrollTop = dictationDebugLog.scrollHeight;
+}
+
 function appendDictatedText(chunk) {
   const text = (chunk || "").trim();
   if (!text) {
@@ -569,14 +588,8 @@ function isNearDuplicateSegment(normalizedText, now = Date.now()) {
     return false;
   }
   trimOldDictationSegments(now);
-  const wordsCount = normalizedText.split(" ").filter(Boolean).length;
-
   for (const segment of dictationRecentSegments) {
     if (segment.norm === normalizedText) {
-      return true;
-    }
-    const minWords = Math.min(segment.words, wordsCount);
-    if (minWords >= 4 && (segment.norm.includes(normalizedText) || normalizedText.includes(segment.norm))) {
       return true;
     }
   }
@@ -586,31 +599,27 @@ function isNearDuplicateSegment(normalizedText, now = Date.now()) {
 function appendDictatedTextUnique(chunk) {
   const rawChunk = (chunk || "").trim();
   if (!rawChunk) {
-    return false;
+    return { ok: false, reason: "empty" };
   }
 
   const normalizedChunk = normalizeDictationText(rawChunk);
   if (!normalizedChunk) {
-    return false;
+    return { ok: false, reason: "normalized-empty" };
   }
 
   const now = Date.now();
   const isRecentDuplicate = normalizedChunk === lastDictationFinalNorm && now - lastDictationFinalAt < 15000;
   if (isRecentDuplicate) {
-    return false;
+    return { ok: false, reason: "same-recent" };
   }
   if (isNearDuplicateSegment(normalizedChunk, now)) {
-    return false;
+    return { ok: false, reason: "seen-recent-buffer" };
   }
 
   const currentRaw = noteInput.value || "";
   const tailNormalized = normalizeDictationText(currentRaw.slice(-1600));
-  const chunkWordsCount = normalizedChunk.split(" ").filter(Boolean).length;
   if (tailNormalized.endsWith(normalizedChunk)) {
-    return false;
-  }
-  if (chunkWordsCount >= 4 && tailNormalized.includes(normalizedChunk)) {
-    return false;
+    return { ok: false, reason: "already-tail" };
   }
 
   const currentWords = currentRaw.trim() ? currentRaw.trim().split(/\s+/) : [];
@@ -629,14 +638,14 @@ function appendDictatedTextUnique(chunk) {
 
   const textToAppend = overlapWords > 0 ? chunkWords.slice(overlapWords).join(" ").trim() : rawChunk;
   if (!textToAppend) {
-    return false;
+    return { ok: false, reason: "fully-overlap" };
   }
   const normalizedAppend = normalizeDictationText(textToAppend);
   if (!normalizedAppend) {
-    return false;
+    return { ok: false, reason: "append-empty" };
   }
   if (isNearDuplicateSegment(normalizedAppend, now)) {
-    return false;
+    return { ok: false, reason: "append-seen-buffer" };
   }
 
   appendDictatedText(textToAppend);
@@ -646,7 +655,7 @@ function appendDictatedTextUnique(chunk) {
   if (normalizedAppend !== normalizedChunk) {
     pushRecentDictationSegment(normalizedAppend, now);
   }
-  return true;
+  return { ok: true, reason: "appended", text: textToAppend };
 }
 
 function initDictationSupport() {
@@ -658,6 +667,7 @@ function initDictationSupport() {
     if (dictationMeta) {
       dictationMeta.textContent = "Dettatura non supportata da questo browser.";
     }
+    pushDictationDebug("init", "SpeechRecognition non supportato");
     return;
   }
 
@@ -669,12 +679,16 @@ function initDictationSupport() {
   dictationRecognition.onstart = () => {
     dictationStopping = false;
     dictationActive = true;
+    dictationRestartFailures = 0;
+    dictationRestartAttempt = 0;
     dictationFinalByResultIndex.clear();
+    pushDictationDebug("start", "microfono attivo");
     renderDictationState();
   };
 
   dictationRecognition.onresult = (event) => {
     const interimChunks = [];
+    let finalHandled = 0;
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       const piece = result?.[0]?.transcript?.trim() || "";
@@ -689,16 +703,26 @@ function initDictationSupport() {
         }
         const previousNormalized = dictationFinalByResultIndex.get(i);
         if (previousNormalized === normalized) {
+          pushDictationDebug("final-skip", `idx=${i} same-normalized`);
           continue;
         }
         dictationFinalByResultIndex.set(i, normalized);
-        appendDictatedTextUnique(piece);
+        const outcome = appendDictatedTextUnique(piece);
+        finalHandled += 1;
+        pushDictationDebug(
+          "final",
+          `idx=${i} ${outcome.ok ? "ok" : `skip:${outcome.reason}`} text="${piece.slice(0, 80)}"`
+        );
       } else {
         interimChunks.push(piece);
       }
     }
+    if (finalHandled === 0 && interimChunks.length === 0) {
+      pushDictationDebug("result", `vuoto resultIndex=${event.resultIndex}`);
+    }
     const interimText = interimChunks.join(" ").trim();
     if (interimText) {
+      pushDictationDebug("interim", interimText.slice(0, 80));
       renderDictationState(`Dettatura: ${interimText.trim()}`);
       return;
     }
@@ -708,6 +732,7 @@ function initDictationSupport() {
   dictationRecognition.onerror = (event) => {
     dictationActive = false;
     const errorCode = event?.error || "";
+    pushDictationDebug("error", errorCode || "unknown");
     if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
       dictationRequested = false;
       dictationStopping = false;
@@ -733,6 +758,8 @@ function initDictationSupport() {
     dictationActive = false;
     dictationFinalByResultIndex.clear();
     if (dictationRequested && !dictationStopping) {
+      dictationRestartAttempt += 1;
+      pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt}`);
       renderDictationState("Dettatura in corso...");
       setTimeout(() => {
         if (!dictationRequested || dictationActive) {
@@ -740,7 +767,16 @@ function initDictationSupport() {
         }
         try {
           dictationRecognition.start();
+          pushDictationDebug("restart", "ok");
         } catch {
+          dictationRestartFailures += 1;
+          pushDictationDebug("restart", `fail #${dictationRestartFailures}`);
+          if (dictationRestartFailures >= 3) {
+            dictationRequested = false;
+            dictationStopping = false;
+            renderDictationState("Riavvio dettatura fallito. Premi Detta.");
+            return;
+          }
           renderDictationState("Dettatura in corso...");
         }
       }, 350);
@@ -748,9 +784,11 @@ function initDictationSupport() {
     }
     dictationRequested = false;
     dictationStopping = false;
+    pushDictationDebug("end", "sessione chiusa");
     renderDictationState();
   };
 
+  pushDictationDebug("init", "SpeechRecognition attivo");
   renderDictationState();
 }
 
@@ -761,6 +799,7 @@ function toggleDictation() {
   if (dictationActive || dictationRequested) {
     dictationRequested = false;
     dictationStopping = true;
+    pushDictationDebug("stop-click", "richiesta stop");
     try {
       dictationRecognition.abort();
     } catch {
@@ -776,10 +815,14 @@ function toggleDictation() {
     dictationRecentSegments.length = 0;
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
+    dictationRestartAttempt = 0;
+    dictationRestartFailures = 0;
+    pushDictationDebug("start-click", "richiesta start");
     dictationRecognition.start();
   } catch {
     dictationRequested = false;
     dictationStopping = false;
+    pushDictationDebug("start-click", "fallita");
     renderDictationState("Impossibile avviare la dettatura.");
   }
 }
