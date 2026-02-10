@@ -101,7 +101,7 @@ let dictationRequested = false;
 let dictationStopping = false;
 let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
-const dictationFinalByResultIndex = new Map();
+let dictationLastFinalRaw = "";
 const dictationRecentSegments = [];
 const dictationDebugEntries = [];
 let dictationRestartAttempt = 0;
@@ -564,6 +564,70 @@ function normalizeDictationText(value) {
     .trim();
 }
 
+function splitDictationTokens(rawText) {
+  const words = (rawText || "").trim().split(/\s+/).filter(Boolean);
+  const tokens = [];
+  for (const raw of words) {
+    const norm = normalizeDictationText(raw);
+    if (!norm) {
+      continue;
+    }
+    tokens.push({ raw, norm });
+  }
+  return tokens;
+}
+
+function countDictationTokens(rawText) {
+  return splitDictationTokens(rawText).length;
+}
+
+function deriveIncrementFromFinal(previousRaw, currentRaw) {
+  const prevTokens = splitDictationTokens(previousRaw);
+  const currTokens = splitDictationTokens(currentRaw);
+
+  if (currTokens.length === 0) {
+    return "";
+  }
+  if (prevTokens.length === 0) {
+    return currTokens.map((t) => t.raw).join(" ").trim();
+  }
+
+  let commonPrefix = 0;
+  const maxPrefix = Math.min(prevTokens.length, currTokens.length);
+  while (commonPrefix < maxPrefix) {
+    if (prevTokens[commonPrefix].norm !== currTokens[commonPrefix].norm) {
+      break;
+    }
+    commonPrefix += 1;
+  }
+
+  if (commonPrefix > 0) {
+    return currTokens.slice(commonPrefix).map((t) => t.raw).join(" ").trim();
+  }
+
+  let overlap = 0;
+  const maxOverlap = Math.min(60, prevTokens.length, currTokens.length);
+  for (let size = maxOverlap; size >= 1; size -= 1) {
+    let same = true;
+    for (let j = 0; j < size; j += 1) {
+      if (prevTokens[prevTokens.length - size + j].norm !== currTokens[j].norm) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      overlap = size;
+      break;
+    }
+  }
+
+  if (overlap > 0) {
+    return currTokens.slice(overlap).map((t) => t.raw).join(" ").trim();
+  }
+
+  return currTokens.map((t) => t.raw).join(" ").trim();
+}
+
 function trimOldDictationSegments(now = Date.now()) {
   const maxAgeMs = 15000;
   while (dictationRecentSegments.length > 0 && now - dictationRecentSegments[0].at > maxAgeMs) {
@@ -681,15 +745,15 @@ function initDictationSupport() {
     dictationActive = true;
     dictationRestartFailures = 0;
     dictationRestartAttempt = 0;
-    dictationFinalByResultIndex.clear();
+    dictationLastFinalRaw = "";
     pushDictationDebug("start", "microfono attivo");
     renderDictationState();
   };
 
   dictationRecognition.onresult = (event) => {
+    const finalCandidates = [];
     const interimChunks = [];
-    let finalHandled = 0;
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+    for (let i = 0; i < event.results.length; i += 1) {
       const result = event.results[i];
       const piece = result?.[0]?.transcript?.trim() || "";
       if (!piece) {
@@ -697,27 +761,46 @@ function initDictationSupport() {
       }
 
       if (result.isFinal) {
-        const normalized = normalizeDictationText(piece);
-        if (!normalized) {
-          continue;
-        }
-        const previousNormalized = dictationFinalByResultIndex.get(i);
-        if (previousNormalized === normalized) {
-          pushDictationDebug("final-skip", `idx=${i} same-normalized`);
-          continue;
-        }
-        dictationFinalByResultIndex.set(i, normalized);
-        const outcome = appendDictatedTextUnique(piece);
-        finalHandled += 1;
-        pushDictationDebug(
-          "final",
-          `idx=${i} ${outcome.ok ? "ok" : `skip:${outcome.reason}`} text="${piece.slice(0, 80)}"`
-        );
+        finalCandidates.push({ idx: i, piece });
       } else {
         interimChunks.push(piece);
       }
     }
-    if (finalHandled === 0 && interimChunks.length === 0) {
+
+    if (finalCandidates.length > 0) {
+      let best = finalCandidates[0];
+      let bestTokens = countDictationTokens(best.piece);
+      for (let i = 1; i < finalCandidates.length; i += 1) {
+        const candidate = finalCandidates[i];
+        const candidateTokens = countDictationTokens(candidate.piece);
+        if (candidateTokens > bestTokens || (candidateTokens === bestTokens && candidate.piece.length > best.piece.length)) {
+          best = candidate;
+          bestTokens = candidateTokens;
+        }
+      }
+
+      const bestNormalized = normalizeDictationText(best.piece);
+      const lastNormalized = normalizeDictationText(dictationLastFinalRaw);
+
+      if (!bestNormalized) {
+        pushDictationDebug("final-skip", `idx=${best.idx} empty-normalized`);
+      } else if (bestNormalized === lastNormalized) {
+        pushDictationDebug("final-skip", `idx=${best.idx} same-final`);
+      } else {
+        const incremental = deriveIncrementFromFinal(dictationLastFinalRaw, best.piece);
+        const outcome = appendDictatedTextUnique(incremental);
+        pushDictationDebug(
+          "final",
+          `idx=${best.idx} inc="${incremental.slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${best.piece.slice(0, 80)}"`
+        );
+      }
+
+      dictationLastFinalRaw = best.piece;
+      renderDictationState();
+      return;
+    }
+
+    if (interimChunks.length === 0) {
       pushDictationDebug("result", `vuoto resultIndex=${event.resultIndex}`);
     }
     const interimText = interimChunks.join(" ").trim();
@@ -736,7 +819,7 @@ function initDictationSupport() {
     if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
       dictationRequested = false;
       dictationStopping = false;
-      dictationFinalByResultIndex.clear();
+      dictationLastFinalRaw = "";
       renderDictationState("Microfono non autorizzato.");
       return;
     }
@@ -756,7 +839,7 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
-    dictationFinalByResultIndex.clear();
+    dictationLastFinalRaw = "";
     if (dictationRequested && !dictationStopping) {
       dictationRestartAttempt += 1;
       pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt}`);
@@ -811,7 +894,7 @@ function toggleDictation() {
   try {
     dictationRequested = true;
     dictationStopping = false;
-    dictationFinalByResultIndex.clear();
+    dictationLastFinalRaw = "";
     dictationRecentSegments.length = 0;
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
