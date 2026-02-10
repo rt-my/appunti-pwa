@@ -100,7 +100,7 @@ let dictationRequested = false;
 let dictationStopping = false;
 let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
-let dictationSessionFinalText = "";
+const dictationFinalByResultIndex = new Map();
 const dictationRecentSegments = [];
 const decryptedSearchIndex = new Map();
 const decryptedNoteTextIndex = new Map();
@@ -583,54 +583,6 @@ function isNearDuplicateSegment(normalizedText, now = Date.now()) {
   return false;
 }
 
-function extractIncrementFromFinal(previousFinal, currentFinal) {
-  const prev = (previousFinal || "").trim();
-  const curr = (currentFinal || "").trim();
-  if (!curr) {
-    return "";
-  }
-  if (!prev) {
-    return curr;
-  }
-
-  const prevWords = prev.split(/\s+/).filter(Boolean);
-  const currWords = curr.split(/\s+/).filter(Boolean);
-  if (currWords.length === 0) {
-    return "";
-  }
-
-  let commonPrefix = 0;
-  const maxPrefix = Math.min(prevWords.length, currWords.length);
-  while (commonPrefix < maxPrefix) {
-    const left = normalizeDictationText(prevWords[commonPrefix]);
-    const right = normalizeDictationText(currWords[commonPrefix]);
-    if (!left || left !== right) {
-      break;
-    }
-    commonPrefix += 1;
-  }
-
-  if (commonPrefix > 0) {
-    return currWords.slice(commonPrefix).join(" ").trim();
-  }
-
-  let overlap = 0;
-  const maxOverlap = Math.min(40, prevWords.length, currWords.length);
-  for (let size = maxOverlap; size >= 1; size -= 1) {
-    const left = normalizeDictationText(prevWords.slice(-size).join(" "));
-    const right = normalizeDictationText(currWords.slice(0, size).join(" "));
-    if (left && left === right) {
-      overlap = size;
-      break;
-    }
-  }
-  if (overlap > 0) {
-    return currWords.slice(overlap).join(" ").trim();
-  }
-
-  return curr;
-}
-
 function appendDictatedTextUnique(chunk) {
   const rawChunk = (chunk || "").trim();
   if (!rawChunk) {
@@ -717,30 +669,33 @@ function initDictationSupport() {
   dictationRecognition.onstart = () => {
     dictationStopping = false;
     dictationActive = true;
-    dictationSessionFinalText = "";
+    dictationFinalByResultIndex.clear();
     renderDictationState();
   };
 
   dictationRecognition.onresult = (event) => {
-    const finalChunks = [];
     const interimChunks = [];
-    for (let i = 0; i < event.results.length; i += 1) {
-      const piece = event.results[i][0]?.transcript || "";
-      if (event.results[i].isFinal) {
-        finalChunks.push(piece);
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const result = event.results[i];
+      const piece = result?.[0]?.transcript?.trim() || "";
+      if (!piece) {
+        continue;
+      }
+
+      if (result.isFinal) {
+        const normalized = normalizeDictationText(piece);
+        if (!normalized) {
+          continue;
+        }
+        const previousNormalized = dictationFinalByResultIndex.get(i);
+        if (previousNormalized === normalized) {
+          continue;
+        }
+        dictationFinalByResultIndex.set(i, normalized);
+        appendDictatedTextUnique(piece);
       } else {
         interimChunks.push(piece);
       }
-    }
-    const finalText = finalChunks.join(" ").trim();
-    if (finalText) {
-      const incrementalText = extractIncrementFromFinal(dictationSessionFinalText, finalText);
-      dictationSessionFinalText = finalText;
-      if (incrementalText) {
-        appendDictatedTextUnique(incrementalText);
-      }
-      renderDictationState();
-      return;
     }
     const interimText = interimChunks.join(" ").trim();
     if (interimText) {
@@ -756,7 +711,7 @@ function initDictationSupport() {
     if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
       dictationRequested = false;
       dictationStopping = false;
-      dictationSessionFinalText = "";
+      dictationFinalByResultIndex.clear();
       renderDictationState("Microfono non autorizzato.");
       return;
     }
@@ -776,7 +731,7 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
-    dictationSessionFinalText = "";
+    dictationFinalByResultIndex.clear();
     if (dictationRequested && !dictationStopping) {
       renderDictationState("Dettatura in corso...");
       setTimeout(() => {
@@ -817,7 +772,7 @@ function toggleDictation() {
   try {
     dictationRequested = true;
     dictationStopping = false;
-    dictationSessionFinalText = "";
+    dictationFinalByResultIndex.clear();
     dictationRecentSegments.length = 0;
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
