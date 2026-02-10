@@ -1,2 +1,11 @@
-﻿appunti-backup*.json
+appunti-backup*.json
 
+# Launcher locale Windows (non pubblicare)
+avvia-appunti.bat
+
+# Config locali sensibili
+.env
+.env.*
+
+# Log locali
+*.log

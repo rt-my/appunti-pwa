@@ -67,6 +67,7 @@ const loadMoreBtn = document.getElementById("load-more-btn");
 const noteTemplate = document.getElementById("note-template");
 const n8nEnabledInput = document.getElementById("n8n-enabled");
 const n8nEncryptJsonInput = document.getElementById("n8n-encrypt-json");
+const n8nOnlyFilteredInput = document.getElementById("n8n-only-filtered");
 const n8nWebhookUrlInput = document.getElementById("n8n-webhook-url");
 const saveN8nBtn = document.getElementById("save-n8n-btn");
 const testN8nBtn = document.getElementById("test-n8n-btn");
@@ -89,6 +90,7 @@ let trashOpen = false;
 let n8nEnabled = false;
 let n8nWebhookUrl = "";
 let n8nEncryptJson = false;
+let n8nOnlyFiltered = false;
 let dictationRecognition = null;
 let dictationActive = false;
 const decryptedSearchIndex = new Map();
@@ -157,6 +159,7 @@ async function initApp() {
       n8nEnabled = Boolean(n8nConfigMeta.value.enabled);
       n8nWebhookUrl = typeof n8nConfigMeta.value.url === "string" ? n8nConfigMeta.value.url.trim() : "";
       n8nEncryptJson = Boolean(n8nConfigMeta.value.encryptJson);
+      n8nOnlyFiltered = Boolean(n8nConfigMeta.value.onlyFiltered);
     }
 
     labels.sort((a, b) => a.name.localeCompare(b.name, "it"));
@@ -260,6 +263,9 @@ function renderN8nConfig() {
   if (n8nEncryptJsonInput) {
     n8nEncryptJsonInput.checked = n8nEncryptJson;
   }
+  if (n8nOnlyFilteredInput) {
+    n8nOnlyFilteredInput.checked = n8nOnlyFiltered;
+  }
   if (n8nWebhookUrlInput) {
     n8nWebhookUrlInput.value = n8nWebhookUrl;
   }
@@ -271,10 +277,10 @@ function renderN8nConfig() {
       n8nMeta.textContent = "Webhook n8n non configurato.";
     } else if (!n8nEnabled) {
       n8nMeta.textContent = "Webhook salvato ma integrazione disattivata.";
-    } else if (n8nEncryptJson) {
-      n8nMeta.textContent = "Webhook n8n attivo (invio JSON cifrato).";
     } else {
-      n8nMeta.textContent = "Webhook n8n attivo (invio JSON in chiaro).";
+      const modeText = n8nEncryptJson ? "JSON cifrato" : "JSON in chiaro";
+      const scopeText = n8nOnlyFiltered ? "solo note filtrate" : "tutte le note";
+      n8nMeta.textContent = `Webhook n8n attivo (${modeText}, ${scopeText}).`;
     }
   }
 }
@@ -282,6 +288,7 @@ function renderN8nConfig() {
 async function saveN8nConfig() {
   n8nEnabled = Boolean(n8nEnabledInput?.checked);
   n8nEncryptJson = Boolean(n8nEncryptJsonInput?.checked);
+  n8nOnlyFiltered = Boolean(n8nOnlyFilteredInput?.checked);
   n8nWebhookUrl = (n8nWebhookUrlInput?.value || "").trim();
   if (n8nEnabled && !n8nWebhookUrl) {
     statusPill.textContent = "Inserisci URL webhook prima di attivarlo";
@@ -294,22 +301,45 @@ async function saveN8nConfig() {
       enabled: n8nEnabled,
       url: n8nWebhookUrl,
       encryptJson: n8nEncryptJson,
+      onlyFiltered: n8nOnlyFiltered,
     },
   });
   renderN8nConfig();
   statusPill.textContent = "Configurazione n8n salvata";
 }
 
-function buildN8nBackupPayload() {
+function getActiveFilterSnapshot() {
+  const selectedLabelIds = Array.from(searchLabelIds);
+  const selectedLabelNames = selectedLabelIds
+    .map((id) => labels.find((entry) => entry.id === id)?.name || "")
+    .filter(Boolean);
+
   return {
-    version: 1,
-    exportedAt: Date.now(),
+    text: searchInput.value.trim(),
+    dateFrom: dateFromInput.value || null,
+    dateTo: dateToInput.value || null,
+    labelIds: selectedLabelIds,
+    labelNames: selectedLabelNames,
+    hideProtected: shouldHideProtectedItems(),
+  };
+}
+
+function buildN8nBackupPayload(options = {}) {
+  const { filtered = false } = options;
+  const exportedAt = Date.now();
+  const notesForExport = getNotesForExport({ filtered });
+
+  return {
+    version: 2,
+    exportedAt,
+    filtered,
+    filters: filtered ? getActiveFilterSnapshot() : null,
     labels,
     protectedLabelIds: Array.from(protectedLabelIds),
-    notes,
+    notes: notesForExport,
     app: {
       source: "appunti-pwa",
-      time: Date.now(),
+      time: exportedAt,
     },
   };
 }
@@ -340,10 +370,25 @@ async function sendJsonToN8n() {
     return;
   }
 
-  const backupPayload = buildN8nBackupPayload();
+  const onlyFiltered = Boolean(n8nOnlyFilteredInput?.checked);
+  const backupPayload = buildN8nBackupPayload({ filtered: onlyFiltered });
+  const dataMeta = {
+    noteCount: backupPayload.notes.length,
+    activeNoteCount: getActiveNotes().length,
+    labelCount: labels.length,
+    protectedLabelCount: protectedLabelIds.size,
+    exportedAt: backupPayload.exportedAt,
+    filtered: onlyFiltered,
+    filters: backupPayload.filters,
+  };
   let requestPayload = {
-    event: "backup.plain",
+    event: "backup.export",
     encrypted: false,
+    mode: {
+      encryptJson: false,
+      onlyFiltered,
+    },
+    meta: dataMeta,
     data: backupPayload,
   };
 
@@ -356,17 +401,16 @@ async function sendJsonToN8n() {
     try {
       const encrypted = await encryptText(JSON.stringify(backupPayload), passphrase);
       requestPayload = {
-        event: "backup.encrypted",
+        event: "backup.export",
         encrypted: true,
+        mode: {
+          encryptJson: true,
+          onlyFiltered,
+        },
+        meta: dataMeta,
         cipherText: encrypted.cipherText,
         iv: encrypted.iv,
         salt: encrypted.salt,
-        meta: {
-          noteCount: notes.length,
-          activeNoteCount: getActiveNotes().length,
-          labelCount: labels.length,
-          exportedAt: backupPayload.exportedAt,
-        },
       };
     } catch {
       statusPill.textContent = "Errore cifratura JSON per n8n";
@@ -380,7 +424,7 @@ async function sendJsonToN8n() {
       statusPill.textContent = `Invio JSON n8n fallito: HTTP ${response.status}`;
       return;
     }
-    statusPill.textContent = "JSON inviato a n8n";
+    statusPill.textContent = `JSON inviato a n8n (${dataMeta.noteCount} note${onlyFiltered ? " filtrate" : ""})`;
   } catch {
     statusPill.textContent = "Invio JSON n8n fallito: webhook non raggiungibile";
   }
@@ -1567,13 +1611,7 @@ function exportFilteredJson() {
     version: 1,
     filtered: true,
     exportedAt: Date.now(),
-    filters: {
-      text: searchInput.value.trim(),
-      dateFrom: dateFromInput.value || null,
-      dateTo: dateToInput.value || null,
-      labelIds: Array.from(searchLabelIds),
-      hideProtected: shouldHideProtectedItems(),
-    },
+    filters: getActiveFilterSnapshot(),
     labels,
     notes: filteredNotes,
   };

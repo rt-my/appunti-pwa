@@ -1,0 +1,79 @@
+{
+  "name": "Appunti PWA - Webhook Backup",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "appunti-backup",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1",
+      "name": "Webhook Appunti",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require(\"crypto\");\n\nfunction fromBase64(input) {\n  return Buffer.from(input, \"base64\");\n}\n\nconst body = $json || {};\n\nif (!body.encrypted) {\n  const data = body.data ?? body;\n  return [\n    {\n      json: {\n        event: body.event ?? \"backup.export\",\n        mode: body.mode ?? { encryptJson: false, onlyFiltered: false },\n        meta: body.meta ?? null,\n        data\n      }\n    }\n  ];\n}\n\nconst passphrase = $env.APPUNTI_PASSPHRASE;\nif (!passphrase) {\n  throw new Error(\"Variabile APPUNTI_PASSPHRASE non impostata in n8n\");\n}\n\nif (!body.cipherText || !body.iv || !body.salt) {\n  throw new Error(\"Payload cifrato incompleto: servono cipherText, iv, salt\");\n}\n\nconst salt = fromBase64(body.salt);\nconst iv = fromBase64(body.iv);\nconst encryptedWithTag = fromBase64(body.cipherText);\n\nconst key = crypto.pbkdf2Sync(passphrase, salt, 150000, 32, \"sha256\");\nconst tag = encryptedWithTag.subarray(encryptedWithTag.length - 16);\nconst ciphertext = encryptedWithTag.subarray(0, encryptedWithTag.length - 16);\n\nconst decipher = crypto.createDecipheriv(\"aes-256-gcm\", key, iv);\ndecipher.setAuthTag(tag);\n\nconst plain = Buffer.concat([\n  decipher.update(ciphertext),\n  decipher.final()\n]).toString(\"utf8\");\n\nconst data = JSON.parse(plain);\n\nreturn [\n  {\n    json: {\n      event: body.event ?? \"backup.export\",\n      mode: body.mode ?? { encryptJson: true, onlyFiltered: false },\n      meta: body.meta ?? null,\n      data\n    }\n  }\n];"
+      },
+      "id": "2",
+      "name": "Decode Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        540,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, receivedAt: $now.toISO(), event: $json.event, noteCount: ($json.data?.notes || []).length } }}",
+        "options": {}
+      },
+      "id": "3",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        820,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Appunti": {
+      "main": [
+        [
+          {
+            "node": "Decode Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decode Payload": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "versionId": "00000000-0000-0000-0000-000000000001"
+}

@@ -13,9 +13,28 @@ Funzioni:
 - filtri combinabili: testo, date, etichette
 - paginazione: primi 100 risultati + "Carica altri 100"
 - backup/import JSON
+- invio backup verso webhook n8n (chiaro o cifrato)
 - PWA installabile con uso offline
 - archivio principale su IndexedDB (piu adatto a molti dati)
 - migrazione automatica da localStorage alla prima apertura
+
+## Payload n8n (Invia JSON)
+
+Il pulsante `Invia JSON` manda un payload con struttura:
+
+- `event`: `backup.export`
+- `encrypted`: `true/false`
+- `mode`: `{ encryptJson, onlyFiltered }`
+- `meta`: conteggi e filtri applicati
+- `data`: presente solo in chiaro
+- `cipherText/iv/salt`: presenti solo in modalita cifrata
+
+Se attivi `Invia solo le note filtrate`, il payload contiene solo i risultati correnti della ricerca.
+
+Workflow pronto:
+- vedi `N8N_WORKFLOW.md` per configurazione completa (plain + cifrato).
+- import diretto: `n8n-appunti-backup-workflow.json`
+- se usi invio cifrato, imposta in n8n la variabile ambiente `APPUNTI_PASSPHRASE`.
 
 ## Avvio senza Python (PowerShell)
 

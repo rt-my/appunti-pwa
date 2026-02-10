@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v9</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v10</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -64,6 +64,10 @@
         <label class="hint">
           <input id="n8n-encrypt-json" type="checkbox" />
           Cifra il JSON prima dell'invio
+        </label>
+        <label class="hint">
+          <input id="n8n-only-filtered" type="checkbox" />
+          Invia solo le note filtrate
         </label>
         <input id="n8n-webhook-url" class="input top-space" type="url" placeholder="https://tuo-n8n/webhook/..." autocomplete="off" />
         <div class="row wrap gap top-space">
