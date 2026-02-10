@@ -39,6 +39,8 @@ const dateFromInput = document.getElementById("date-from");
 const dateToInput = document.getElementById("date-to");
 const unlockSearchBtn = document.getElementById("unlock-search-btn");
 const lockSearchBtn = document.getElementById("lock-search-btn");
+const encryptedVisibilityWrap = document.getElementById("encrypted-visibility-wrap");
+const hideEncryptedNotesCheckbox = document.getElementById("hide-encrypted-notes");
 const encryptedSearchMeta = document.getElementById("encrypted-search-meta");
 const searchLabelsBox = document.getElementById("search-labels");
 const clearFiltersBtn = document.getElementById("clear-filters");
@@ -108,6 +110,7 @@ async function initApp() {
     bindEvents();
     renderBackupMeta();
     renderEncryptedSearchMeta();
+    updateEncryptionVisibilityControl();
     renderLabels();
     renderNotes();
     registerServiceWorker();
@@ -146,12 +149,14 @@ function bindEvents() {
     }
     sessionPassphrase = typed;
     statusPill.textContent = "Passphrase sessione impostata";
+    updateEncryptionVisibilityControl();
   });
 
   on(clearPassphraseBtn, "click", () => {
     sessionPassphrase = null;
     lockEncryptedSearch();
     statusPill.textContent = "Sessione bloccata: passphrase rimossa";
+    updateEncryptionVisibilityControl();
   });
 
   on(searchInput, "input", debounceFilterRender);
@@ -159,6 +164,7 @@ function bindEvents() {
   on(dateToInput, "change", resetPaginationAndRender);
   on(unlockSearchBtn, "click", unlockEncryptedSearch);
   on(lockSearchBtn, "click", lockEncryptedSearch);
+  on(hideEncryptedNotesCheckbox, "change", resetPaginationAndRender);
 
   on(clearFiltersBtn, "click", () => {
     searchInput.value = "";
@@ -229,6 +235,20 @@ function lockEncryptedSearch() {
   decryptedSearchIndex.clear();
   encryptedSearchEnabled = false;
   renderEncryptedSearchMeta();
+  resetPaginationAndRender();
+}
+
+function updateEncryptionVisibilityControl() {
+  if (!encryptedVisibilityWrap || !hideEncryptedNotesCheckbox) {
+    return;
+  }
+
+  const visible = Boolean(sessionPassphrase);
+  encryptedVisibilityWrap.classList.toggle("hidden", !visible);
+
+  if (!visible) {
+    hideEncryptedNotesCheckbox.checked = false;
+  }
 }
 
 function renderEncryptedSearchMeta() {
@@ -528,9 +548,14 @@ function getFilteredNotes() {
   const textQuery = searchInput.value.trim().toLowerCase();
   const dateFrom = dateFromInput.value ? new Date(`${dateFromInput.value}T00:00:00`).getTime() : null;
   const dateTo = dateToInput.value ? new Date(`${dateToInput.value}T23:59:59`).getTime() : null;
+  const hideEncrypted = Boolean(hideEncryptedNotesCheckbox?.checked);
 
   return notes
     .filter((note) => {
+      if (hideEncrypted && note.encrypted) {
+        return false;
+      }
+
       const plainText = (note.text || "").toLowerCase();
       const decryptedText = decryptedSearchIndex.get(note.id) || "";
       const textMatch = !textQuery || (!note.encrypted && plainText.includes(textQuery)) || (note.encrypted && encryptedSearchEnabled && decryptedText.includes(textQuery));
@@ -1162,6 +1187,7 @@ async function ensureSessionPassphrase(message, forcePrompt = false) {
   }
 
   sessionPassphrase = typed;
+  updateEncryptionVisibilityControl();
   return sessionPassphrase;
 }
 
@@ -1234,6 +1260,8 @@ function base64ToBytes(base64) {
   }
   return bytes;
 }
+
+
 
 
 
