@@ -37,8 +37,6 @@ const menuOverlay = document.getElementById("menu-overlay");
 const searchInput = document.getElementById("search-input");
 const dateFromInput = document.getElementById("date-from");
 const dateToInput = document.getElementById("date-to");
-const unlockSearchBtn = document.getElementById("unlock-search-btn");
-const lockSearchBtn = document.getElementById("lock-search-btn");
 const encryptedVisibilityWrap = document.getElementById("encrypted-visibility-wrap");
 const hideEncryptedNotesCheckbox = document.getElementById("hide-encrypted-notes");
 const encryptedSearchMeta = document.getElementById("encrypted-search-meta");
@@ -49,8 +47,7 @@ const noteInput = document.getElementById("note-input");
 const addNoteBtn = document.getElementById("add-note-btn");
 const labelInput = document.getElementById("label-input");
 const addLabelBtn = document.getElementById("add-label-btn");
-const setPassphraseBtn = document.getElementById("set-passphrase-btn");
-const clearPassphraseBtn = document.getElementById("clear-passphrase-btn");
+const sessionPassphraseBtn = document.getElementById("session-passphrase-btn");
 const allLabelsBox = document.getElementById("all-labels");
 const quickLabelsBox = document.getElementById("quick-labels");
 const notesList = document.getElementById("notes-list");
@@ -69,8 +66,8 @@ let renderObserver = null;
 let renderToken = 0;
 let searchDebounceTimer = null;
 let sessionPassphrase = null;
-let encryptedSearchEnabled = false;
 const decryptedSearchIndex = new Map();
+const decryptedNoteTextIndex = new Map();
 
 const selectedNewLabelIds = new Set();
 const searchLabelIds = new Set();
@@ -142,28 +139,11 @@ function bindEvents() {
     }
   });
 
-  on(setPassphraseBtn, "click", () => {
-    const typed = window.prompt("Imposta passphrase per note protette:");
-    if (!typed) {
-      return;
-    }
-    sessionPassphrase = typed;
-    statusPill.textContent = "Passphrase sessione impostata";
-    updateEncryptionVisibilityControl();
-  });
-
-  on(clearPassphraseBtn, "click", () => {
-    sessionPassphrase = null;
-    lockEncryptedSearch();
-    statusPill.textContent = "Sessione bloccata: passphrase rimossa";
-    updateEncryptionVisibilityControl();
-  });
+  on(sessionPassphraseBtn, "click", handleSessionPassphraseClick);
 
   on(searchInput, "input", debounceFilterRender);
   on(dateFromInput, "change", resetPaginationAndRender);
   on(dateToInput, "change", resetPaginationAndRender);
-  on(unlockSearchBtn, "click", unlockEncryptedSearch);
-  on(lockSearchBtn, "click", lockEncryptedSearch);
   on(hideEncryptedNotesCheckbox, "change", () => {
     renderLabels();
     resetPaginationAndRender();
@@ -198,47 +178,80 @@ async function runGuidedBackup() {
   statusPill.textContent = "Backup esportato. Ora caricalo su Drive/OneDrive.";
 }
 
-
-async function unlockEncryptedSearch() {
-  const hasEncrypted = notes.some((n) => n.encrypted);
-  if (!hasEncrypted) {
-    statusPill.textContent = "Nessuna nota cifrata da indicizzare";
+async function handleSessionPassphraseClick() {
+  if (sessionPassphrase) {
+    clearSessionPassphrase();
+    statusPill.textContent = "Sessione bloccata";
     return;
   }
 
-  const passphrase = await ensureSessionPassphrase("Inserisci passphrase per cercare nelle note cifrate:", true);
-  if (!passphrase) {
-    statusPill.textContent = "Ricerca cifrate non attivata";
+  const typed = window.prompt("Inserisci passphrase di sessione:");
+  if (!typed) {
     return;
   }
 
-  try {
-    decryptedSearchIndex.clear();
-    for (const note of notes) {
-      if (!note.encrypted) {
-        continue;
-      }
-      const plain = await decryptText(note, passphrase);
-      decryptedSearchIndex.set(note.id, plain.toLowerCase());
+  const result = await applySessionPassphrase(typed);
+  if (result.ok) {
+    if (result.failed > 0) {
+      statusPill.textContent = `Sessione aperta: ${result.failed} note non decifrabili`;
+    } else {
+      statusPill.textContent = "Sessione aperta";
     }
-
-    encryptedSearchEnabled = true;
-    renderEncryptedSearchMeta();
-    resetPaginationAndRender();
-    statusPill.textContent = "Ricerca note cifrate attivata (sessione)";
-  } catch {
-    decryptedSearchIndex.clear();
-    encryptedSearchEnabled = false;
-    renderEncryptedSearchMeta();
-    statusPill.textContent = "Passphrase errata: ricerca cifrate non attiva";
+  } else {
+    statusPill.textContent = "Passphrase errata o incompatibile con le note cifrate";
   }
 }
 
-function lockEncryptedSearch() {
+function clearSessionPassphrase() {
+  sessionPassphrase = null;
   decryptedSearchIndex.clear();
-  encryptedSearchEnabled = false;
+  decryptedNoteTextIndex.clear();
+  if (sessionPassphraseBtn) {
+    sessionPassphraseBtn.textContent = "Password";
+  }
   renderEncryptedSearchMeta();
-  resetPaginationAndRender();
+  updateEncryptionVisibilityControl();
+}
+
+async function applySessionPassphrase(passphrase) {
+  const result = await buildDecryptedIndexes(passphrase);
+  if (result.totalEncrypted > 0 && result.okCount === 0) {
+    return { ok: false, failed: result.failedCount };
+  }
+
+  sessionPassphrase = passphrase;
+  if (sessionPassphraseBtn) {
+    sessionPassphraseBtn.textContent = "Blocca sessione";
+  }
+  renderEncryptedSearchMeta();
+  updateEncryptionVisibilityControl();
+  return { ok: true, failed: result.failedCount };
+}
+
+async function buildDecryptedIndexes(passphrase) {
+  decryptedSearchIndex.clear();
+  decryptedNoteTextIndex.clear();
+
+  let totalEncrypted = 0;
+  let okCount = 0;
+  let failedCount = 0;
+
+  for (const note of notes) {
+    if (!note.encrypted) {
+      continue;
+    }
+    totalEncrypted += 1;
+    try {
+      const plain = await decryptText(note, passphrase);
+      decryptedNoteTextIndex.set(note.id, plain);
+      decryptedSearchIndex.set(note.id, plain.toLowerCase());
+      okCount += 1;
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  return { totalEncrypted, okCount, failedCount };
 }
 
 function updateEncryptionVisibilityControl() {
@@ -247,9 +260,12 @@ function updateEncryptionVisibilityControl() {
   }
 
   const unlocked = Boolean(sessionPassphrase);
-  hideEncryptedNotesCheckbox.disabled = !unlocked;
-  encryptedVisibilityWrap.classList.toggle("hidden", !unlocked);
-  encryptedVisibilityWrap.title = unlocked ? "" : "Il filtro torna disponibile dopo avere inserito la passphrase";
+  if (unlocked) {
+    hideEncryptedNotesCheckbox.checked = false;
+  }
+  hideEncryptedNotesCheckbox.disabled = unlocked;
+  encryptedVisibilityWrap.classList.toggle("hidden", unlocked);
+  encryptedVisibilityWrap.title = unlocked ? "" : "Se attivo, nasconde totalmente etichette e note cifrate";
 
   renderLabels();
   resetPaginationAndRender();
@@ -259,10 +275,10 @@ function renderEncryptedSearchMeta() {
   if (!encryptedSearchMeta) {
     return;
   }
-  if (encryptedSearchEnabled) {
-    encryptedSearchMeta.textContent = "Ricerca cifrate: attiva (solo sessione corrente).";
+  if (sessionPassphrase) {
+    encryptedSearchMeta.textContent = "Sessione aperta: ricerca cifrate attiva.";
   } else {
-    encryptedSearchMeta.textContent = "Ricerca cifrate: disattiva.";
+    encryptedSearchMeta.textContent = "Sessione bloccata: ricerca cifrate disattiva.";
   }
 }
 
@@ -339,6 +355,11 @@ async function submitNewNote() {
       iv: encryptedPayload.iv,
       salt: encryptedPayload.salt,
     };
+
+    if (sessionPassphrase) {
+      decryptedNoteTextIndex.set(note.id, text);
+      decryptedSearchIndex.set(note.id, text.toLowerCase());
+    }
   }
 
   notes.unshift(note);
@@ -513,6 +534,15 @@ async function encryptExistingNotesForLabel(label) {
         updatedAt: Date.now(),
       };
       updatedBatch.push(updatedNote);
+
+      if (sessionPassphrase && sessionPassphrase === passphrase) {
+        const plain = note.text || "";
+        decryptedNoteTextIndex.set(updatedNote.id, plain);
+        decryptedSearchIndex.set(updatedNote.id, plain.toLowerCase());
+      } else {
+        decryptedNoteTextIndex.delete(updatedNote.id);
+        decryptedSearchIndex.delete(updatedNote.id);
+      }
     }
 
     const updatesById = new Map(updatedBatch.map((n) => [n.id, n]));
@@ -524,7 +554,7 @@ async function encryptExistingNotesForLabel(label) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  lockEncryptedSearch();
+  renderEncryptedSearchMeta();
   renderNotes();
   statusPill.textContent = `Cifratura completata per #${label.name}: ${processed} note`;
 }
@@ -570,7 +600,7 @@ function noteHasProtectedLabel(note) {
 }
 
 function shouldHideProtectedItems() {
-  return Boolean(hideEncryptedNotesCheckbox?.checked);
+  return !sessionPassphrase && Boolean(hideEncryptedNotesCheckbox?.checked);
 }
 
 function getFilteredNotes() {
@@ -587,7 +617,7 @@ function getFilteredNotes() {
 
       const plainText = (note.text || "").toLowerCase();
       const decryptedText = decryptedSearchIndex.get(note.id) || "";
-      const textMatch = !textQuery || (!note.encrypted && plainText.includes(textQuery)) || (note.encrypted && encryptedSearchEnabled && decryptedText.includes(textQuery));
+      const textMatch = !textQuery || (!note.encrypted && plainText.includes(textQuery)) || (note.encrypted && Boolean(sessionPassphrase) && decryptedText.includes(textQuery));
       if (!textMatch) {
         return false;
       }
@@ -702,8 +732,10 @@ function renderNoteItem(note) {
   const editBtn = fragment.querySelector(".edit-btn");
   const deleteBtn = fragment.querySelector(".delete-btn");
 
-  if (note.encrypted) {
-    noteText.textContent = "Nota criptata. Usa Sblocca per leggere/modificare.";
+  if (note.encrypted && sessionPassphrase && decryptedNoteTextIndex.has(note.id)) {
+    noteText.textContent = decryptedNoteTextIndex.get(note.id) || "";
+  } else if (note.encrypted) {
+    noteText.textContent = "Nota criptata. Apri la sessione con Password per vedere il testo.";
   } else {
     noteText.textContent = note.text;
   }
@@ -729,8 +761,16 @@ function renderNoteItem(note) {
     badge.className = "protected-pill";
     badge.textContent = "criptata";
     noteLabelsBox.append(badge);
-    editBtn.textContent = "Sblocca";
-    editBtn.addEventListener("click", () => unlockAndEdit(item, note));
+
+    if (sessionPassphrase && decryptedNoteTextIndex.has(note.id)) {
+      editBtn.textContent = "Modifica";
+      editBtn.addEventListener("click", () => enterEditMode(item, { ...note, text: decryptedNoteTextIndex.get(note.id) || "" }));
+    } else {
+      editBtn.textContent = "Password";
+      editBtn.addEventListener("click", () => {
+        statusPill.textContent = "Apri la sessione dal pulsante Password nel menu";
+      });
+    }
   } else {
     editBtn.textContent = "Modifica";
     editBtn.addEventListener("click", () => enterEditMode(item, note));
@@ -739,25 +779,12 @@ function renderNoteItem(note) {
   deleteBtn.addEventListener("click", async () => {
     notes = notes.filter((entry) => entry.id !== note.id);
     await idbDelete(IDB.stores.notes, note.id);
+    decryptedSearchIndex.delete(note.id);
+    decryptedNoteTextIndex.delete(note.id);
     renderNotes();
   });
 
   return fragment;
-}
-
-async function unlockAndEdit(item, note) {
-  const passphrase = await ensureSessionPassphrase("Inserisci passphrase per sbloccare la nota:");
-  if (!passphrase) {
-    statusPill.textContent = "Sblocco annullato";
-    return;
-  }
-
-  try {
-    const plain = await decryptText(note, passphrase);
-    enterEditMode(item, { ...note, text: plain });
-  } catch {
-    statusPill.textContent = "Passphrase errata o dati non validi";
-  }
 }
 
 function enterEditMode(item, note) {
@@ -842,6 +869,20 @@ function enterEditMode(item, note) {
 
     notes = notes.map((entry) => (entry.id === note.id ? updatedNote : entry));
     await idbPut(IDB.stores.notes, updatedNote);
+
+    if (updatedNote.encrypted) {
+      if (sessionPassphrase) {
+        decryptedNoteTextIndex.set(updatedNote.id, text);
+        decryptedSearchIndex.set(updatedNote.id, text.toLowerCase());
+      } else {
+        decryptedNoteTextIndex.delete(updatedNote.id);
+        decryptedSearchIndex.delete(updatedNote.id);
+      }
+    } else {
+      decryptedNoteTextIndex.delete(updatedNote.id);
+      decryptedSearchIndex.delete(updatedNote.id);
+    }
+
     renderNotes();
   });
 
@@ -899,6 +940,12 @@ async function importBackupFromFile(event) {
     const parsed = JSON.parse(text);
     mergeBackup(parsed);
     await rewriteCollections();
+    if (sessionPassphrase) {
+      const refresh = await applySessionPassphrase(sessionPassphrase);
+      if (!refresh.ok) {
+        clearSessionPassphrase();
+      }
+    }
     renderLabels();
     resetPaginationAndRender();
     statusPill.textContent = "Backup importato correttamente";
@@ -1219,8 +1266,11 @@ async function ensureSessionPassphrase(message, forcePrompt = false) {
     return null;
   }
 
-  sessionPassphrase = typed;
-  updateEncryptionVisibilityControl();
+  const result = await applySessionPassphrase(typed);
+  if (!result.ok) {
+    statusPill.textContent = "Passphrase errata o incompatibile con le note cifrate";
+    return null;
+  }
   return sessionPassphrase;
 }
 

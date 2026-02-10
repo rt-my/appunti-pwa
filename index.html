@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v4</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v5</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -28,15 +28,11 @@
           <input id="date-from" class="input" type="date" />
           <input id="date-to" class="input" type="date" />
         </div>
-        <div class="row wrap gap top-space">
-          <button id="unlock-search-btn" class="btn ghost" type="button">Sblocca ricerca cifrate</button>
-          <button id="lock-search-btn" class="btn ghost" type="button">Blocca ricerca cifrate</button>
-        </div>
         <label id="encrypted-visibility-wrap" class="hint hidden">
           <input id="hide-encrypted-notes" type="checkbox" />
-          Nascondi completamente le note cifrate
+          Nascondi etichette e note cifrate
         </label>
-        <p id="encrypted-search-meta" class="hint">Ricerca cifrate: disattiva.</p>
+        <p id="encrypted-search-meta" class="hint">Sessione bloccata: ricerca cifrate disattiva.</p>
         <div id="search-labels" class="row wrap gap top-space"></div>
         <div class="row gap top-space">
           <button id="clear-filters" class="btn ghost" type="button">Pulisci filtri</button>
@@ -50,8 +46,7 @@
           <button id="add-label-btn" class="btn primary" type="button">Aggiungi</button>
         </div>
         <div class="row wrap gap top-space">
-          <button id="set-passphrase-btn" class="btn ghost" type="button">Imposta passphrase sessione</button>
-          <button id="clear-passphrase-btn" class="btn ghost" type="button">Blocca sessione</button>
+          <button id="session-passphrase-btn" class="btn ghost" type="button">Password</button>
         </div>
         <p class="hint">Le etichette protette cifrano il testo. Con passphrase di sessione attiva non viene richiesta ogni volta.</p>
         <div id="all-labels" class="row wrap gap top-space"></div>
