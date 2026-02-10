@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v5</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v6</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -57,6 +57,8 @@
         <div class="row wrap gap">
           <button id="backup-guide-btn" class="btn ghost" type="button">Backup guidato</button>
           <button id="export-backup-btn" class="btn primary" type="button">Esporta JSON</button>
+          <button id="export-md-btn" class="btn ghost" type="button">Esporta MD</button>
+          <button id="export-txt-btn" class="btn ghost" type="button">Esporta TXT</button>
           <button id="export-incremental-btn" class="btn ghost" type="button">Esporta incrementale</button>
           <button id="import-backup-btn" class="btn ghost" type="button">Importa JSON</button>
           <input id="import-backup-file" type="file" accept="application/json" class="hidden" />
@@ -120,6 +122,7 @@
         <div class="note-top">
           <p class="note-text"></p>
           <div class="note-actions">
+            <button class="btn ghost pin-btn" type="button">Pin</button>
             <button class="btn ghost edit-btn" type="button">Modifica</button>
             <button class="btn danger delete-btn" type="button">Elimina</button>
           </div>

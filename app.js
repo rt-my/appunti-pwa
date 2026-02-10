@@ -24,6 +24,8 @@ const backupWarning = document.getElementById("backup-warning");
 const backupGuideBtn = document.getElementById("backup-guide-btn");
 const backupGuideBox = document.getElementById("backup-guide");
 const exportBackupBtn = document.getElementById("export-backup-btn");
+const exportMdBtn = document.getElementById("export-md-btn");
+const exportTxtBtn = document.getElementById("export-txt-btn");
 const exportIncrementalBtn = document.getElementById("export-incremental-btn");
 const backupIncrementalMeta = document.getElementById("backup-incremental-meta");
 const importBackupBtn = document.getElementById("import-backup-btn");
@@ -75,6 +77,18 @@ const protectedLabelIds = new Set();
 
 initApp();
 
+function isPinned(note) {
+  return note?.pinned === true;
+}
+
+function compareNotes(a, b) {
+  const pinDelta = Number(isPinned(b)) - Number(isPinned(a));
+  if (pinDelta !== 0) {
+    return pinDelta;
+  }
+  return (b.createdAt || 0) - (a.createdAt || 0);
+}
+
 function on(el, eventName, handler) {
   if (!el) {
     return;
@@ -102,7 +116,7 @@ async function initApp() {
     list.forEach((id) => protectedLabelIds.add(id));
 
     labels.sort((a, b) => a.name.localeCompare(b.name, "it"));
-    notes.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    notes.sort(compareNotes);
 
     bindEvents();
     renderBackupMeta();
@@ -165,6 +179,8 @@ function bindEvents() {
 
   on(backupGuideBtn, "click", runGuidedBackup);
   on(exportBackupBtn, "click", exportBackup);
+  on(exportMdBtn, "click", () => exportNotesAsText("md"));
+  on(exportTxtBtn, "click", () => exportNotesAsText("txt"));
   on(exportIncrementalBtn, "click", exportIncrementalBackup);
   on(importBackupBtn, "click", () => importBackupFile.click());
   on(importBackupFile, "change", importBackupFromFile);
@@ -330,6 +346,7 @@ async function submitNewNote() {
     labelIds: selected,
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    pinned: false,
     encrypted: false,
   };
 
@@ -640,7 +657,7 @@ function getFilteredNotes() {
 
       return true;
     })
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    .sort(compareNotes);
 }
 
 function renderNotes() {
@@ -729,6 +746,7 @@ function renderNoteItem(note) {
   const noteText = fragment.querySelector(".note-text");
   const noteMeta = fragment.querySelector(".note-meta");
   const noteLabelsBox = fragment.querySelector(".note-labels");
+  const pinBtn = fragment.querySelector(".pin-btn");
   const editBtn = fragment.querySelector(".edit-btn");
   const deleteBtn = fragment.querySelector(".delete-btn");
 
@@ -741,6 +759,12 @@ function renderNoteItem(note) {
   }
 
   noteMeta.textContent = buildMetaText(note);
+  if (isPinned(note)) {
+    const pinnedBadge = document.createElement("span");
+    pinnedBadge.className = "protected-pill";
+    pinnedBadge.textContent = "in evidenza";
+    noteLabelsBox.append(pinnedBadge);
+  }
 
   const hideProtected = shouldHideProtectedItems();
   (note.labelIds || [])
@@ -766,15 +790,25 @@ function renderNoteItem(note) {
       editBtn.textContent = "Modifica";
       editBtn.addEventListener("click", () => enterEditMode(item, { ...note, text: decryptedNoteTextIndex.get(note.id) || "" }));
     } else {
-      editBtn.textContent = "Password";
-      editBtn.addEventListener("click", () => {
-        statusPill.textContent = "Apri la sessione dal pulsante Password nel menu";
-      });
+      editBtn.textContent = "Bloccata";
+      editBtn.disabled = true;
     }
   } else {
     editBtn.textContent = "Modifica";
     editBtn.addEventListener("click", () => enterEditMode(item, note));
   }
+
+  pinBtn.textContent = isPinned(note) ? "Unpin" : "Pin";
+  pinBtn.addEventListener("click", async () => {
+    const updatedNote = {
+      ...note,
+      pinned: !isPinned(note),
+      updatedAt: Date.now(),
+    };
+    notes = notes.map((entry) => (entry.id === note.id ? updatedNote : entry));
+    await idbPut(IDB.stores.notes, updatedNote);
+    renderNotes();
+  });
 
   deleteBtn.addEventListener("click", async () => {
     notes = notes.filter((entry) => entry.id !== note.id);
@@ -905,6 +939,77 @@ function buildMetaText(note) {
   return `Inserito: ${createdStamp} - Modificato: ${updatedStamp}`;
 }
 
+function getNoteExportText(note) {
+  if (note.encrypted) {
+    if (sessionPassphrase && decryptedNoteTextIndex.has(note.id)) {
+      return decryptedNoteTextIndex.get(note.id) || "";
+    }
+    return "[NOTA CIFRATA - apri la sessione Password per esportare il testo]";
+  }
+  return note.text || "";
+}
+
+function getNoteLabelNames(note) {
+  return (note.labelIds || [])
+    .map((labelId) => labels.find((entry) => entry.id === labelId))
+    .filter(Boolean)
+    .map((label) => `#${label.name}`);
+}
+
+function downloadTextFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportNotesAsText(format) {
+  const sorted = [...notes].sort(compareNotes);
+  const exportedAt = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date());
+  const encryptedLockedCount = sorted.filter((note) => note.encrypted && !(sessionPassphrase && decryptedNoteTextIndex.has(note.id))).length;
+  const extension = format === "md" ? "md" : "txt";
+  const filename = `appunti-export.${extension}`;
+
+  if (format === "md") {
+    const lines = ["# Appunti", "", `Esportato: ${exportedAt}`, ""];
+    sorted.forEach((note, index) => {
+      const labelsText = getNoteLabelNames(note).join(" ");
+      const createdStamp = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date(note.createdAt || Date.now()));
+      const title = `## ${index + 1}. ${isPinned(note) ? "[PIN] " : ""}${note.encrypted ? "[CIFRATA]" : ""}`.trim();
+      lines.push(title);
+      lines.push(`- Inserito: ${createdStamp}`);
+      lines.push(`- Etichette: ${labelsText || "-"}`);
+      lines.push("");
+      lines.push("```");
+      lines.push(getNoteExportText(note));
+      lines.push("```");
+      lines.push("");
+    });
+    downloadTextFile(lines.join("\n"), filename, "text/markdown;charset=utf-8");
+  } else {
+    const lines = ["APPUNTI", `Esportato: ${exportedAt}`, ""];
+    sorted.forEach((note, index) => {
+      const labelsText = getNoteLabelNames(note).join(" ");
+      const createdStamp = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date(note.createdAt || Date.now()));
+      lines.push(`----- NOTA ${index + 1} ${isPinned(note) ? "[PIN]" : ""} ${note.encrypted ? "[CIFRATA]" : ""}`.trim());
+      lines.push(`Inserito: ${createdStamp}`);
+      lines.push(`Etichette: ${labelsText || "-"}`);
+      lines.push(getNoteExportText(note));
+      lines.push("");
+    });
+    downloadTextFile(lines.join("\n"), filename, "text/plain;charset=utf-8");
+  }
+
+  if (encryptedLockedCount > 0) {
+    statusPill.textContent = `Export ${extension.toUpperCase()} completato (${encryptedLockedCount} note cifrate senza testo)`;
+  } else {
+    statusPill.textContent = `Export ${extension.toUpperCase()} completato`;
+  }
+}
+
 async function exportBackup() {
   const payload = {
     version: 1,
@@ -1019,6 +1124,7 @@ function mergeBackup(data) {
         id: typeof note.id === "string" && note.id ? note.id : generateId(),
         text: "",
         encrypted: true,
+        pinned: note.pinned === true,
         cipherText: note.cipherText,
         iv: note.iv,
         salt: note.salt,
@@ -1044,6 +1150,7 @@ function mergeBackup(data) {
         id: typeof note.id === "string" && note.id ? note.id : generateId(),
         text: normalizedText,
         encrypted: false,
+        pinned: note.pinned === true,
         labelIds: mappedLabelIds,
         createdAt: Number.isFinite(note.createdAt) ? note.createdAt : Date.now(),
         updatedAt: Number.isFinite(note.updatedAt) ? note.updatedAt : Number.isFinite(note.createdAt) ? note.createdAt : Date.now(),
@@ -1066,7 +1173,7 @@ function mergeBackup(data) {
     }
   });
 
-  notes.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  notes.sort(compareNotes);
 }
 
 async function rewriteCollections() {
