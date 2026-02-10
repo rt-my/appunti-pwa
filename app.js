@@ -3,6 +3,7 @@
   notes: "notes_items",
   lastBackupAt: "notes_last_backup_at",
   lastIncrementalExportAt: "notes_last_incremental_export_at",
+  n8nConfig: "notes_n8n_config",
 };
 
 const IDB = {
@@ -30,6 +31,10 @@ const exportIncrementalBtn = document.getElementById("export-incremental-btn");
 const backupIncrementalMeta = document.getElementById("backup-incremental-meta");
 const importBackupBtn = document.getElementById("import-backup-btn");
 const importBackupFile = document.getElementById("import-backup-file");
+const toggleTrashBtn = document.getElementById("toggle-trash-btn");
+const emptyTrashBtn = document.getElementById("empty-trash-btn");
+const trashMeta = document.getElementById("trash-meta");
+const trashList = document.getElementById("trash-list");
 
 const menuToggle = document.getElementById("menu-toggle");
 const menuClose = document.getElementById("menu-close");
@@ -44,9 +49,14 @@ const hideEncryptedNotesCheckbox = document.getElementById("hide-encrypted-notes
 const encryptedSearchMeta = document.getElementById("encrypted-search-meta");
 const searchLabelsBox = document.getElementById("search-labels");
 const clearFiltersBtn = document.getElementById("clear-filters");
+const exportFilteredJsonBtn = document.getElementById("export-filtered-json-btn");
+const exportFilteredMdBtn = document.getElementById("export-filtered-md-btn");
+const exportFilteredTxtBtn = document.getElementById("export-filtered-txt-btn");
 
 const noteInput = document.getElementById("note-input");
 const addNoteBtn = document.getElementById("add-note-btn");
+const dictateBtn = document.getElementById("dictate-btn");
+const dictationMeta = document.getElementById("dictation-meta");
 const labelInput = document.getElementById("label-input");
 const addLabelBtn = document.getElementById("add-label-btn");
 const sessionPassphraseBtn = document.getElementById("session-passphrase-btn");
@@ -55,6 +65,11 @@ const quickLabelsBox = document.getElementById("quick-labels");
 const notesList = document.getElementById("notes-list");
 const loadMoreBtn = document.getElementById("load-more-btn");
 const noteTemplate = document.getElementById("note-template");
+const n8nEnabledInput = document.getElementById("n8n-enabled");
+const n8nWebhookUrlInput = document.getElementById("n8n-webhook-url");
+const saveN8nBtn = document.getElementById("save-n8n-btn");
+const testN8nBtn = document.getElementById("test-n8n-btn");
+const n8nMeta = document.getElementById("n8n-meta");
 
 let db = null;
 let notes = [];
@@ -68,6 +83,11 @@ let renderObserver = null;
 let renderToken = 0;
 let searchDebounceTimer = null;
 let sessionPassphrase = null;
+let trashOpen = false;
+let n8nEnabled = false;
+let n8nWebhookUrl = "";
+let dictationRecognition = null;
+let dictationActive = false;
 const decryptedSearchIndex = new Map();
 const decryptedNoteTextIndex = new Map();
 
@@ -87,6 +107,20 @@ function compareNotes(a, b) {
     return pinDelta;
   }
   return (b.createdAt || 0) - (a.createdAt || 0);
+}
+
+function isTrashed(note) {
+  return Number.isFinite(note?.trashedAt) && note.trashedAt > 0;
+}
+
+function getActiveNotes() {
+  return notes.filter((note) => !isTrashed(note));
+}
+
+function getTrashNotes() {
+  return notes
+    .filter((note) => isTrashed(note))
+    .sort((a, b) => (b.trashedAt || 0) - (a.trashedAt || 0));
 }
 
 function on(el, eventName, handler) {
@@ -115,15 +149,24 @@ async function initApp() {
     const list = Array.isArray(protectedMeta?.value) ? protectedMeta.value : [];
     list.forEach((id) => protectedLabelIds.add(id));
 
+    const n8nConfigMeta = await idbGet(IDB.stores.meta, KEYS.n8nConfig);
+    if (n8nConfigMeta?.value && typeof n8nConfigMeta.value === "object") {
+      n8nEnabled = Boolean(n8nConfigMeta.value.enabled);
+      n8nWebhookUrl = typeof n8nConfigMeta.value.url === "string" ? n8nConfigMeta.value.url.trim() : "";
+    }
+
     labels.sort((a, b) => a.name.localeCompare(b.name, "it"));
     notes.sort(compareNotes);
 
     bindEvents();
+    renderN8nConfig();
+    initDictationSupport();
     renderBackupMeta();
     renderEncryptedSearchMeta();
     updateEncryptionVisibilityControl();
     renderLabels();
     renderNotes();
+    renderTrash();
     registerServiceWorker();
 
     statusPill.textContent = "Archivio locale pronto (IndexedDB)";
@@ -138,6 +181,7 @@ function bindEvents() {
   on(menuOverlay, "click", closeMenu);
 
   on(addNoteBtn, "click", submitNewNote);
+  on(dictateBtn, "click", toggleDictation);
   on(noteInput, "keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -171,6 +215,9 @@ function bindEvents() {
     renderLabels();
     resetPaginationAndRender();
   });
+  on(exportFilteredJsonBtn, "click", exportFilteredJson);
+  on(exportFilteredMdBtn, "click", () => exportNotesAsText("md", { filtered: true }));
+  on(exportFilteredTxtBtn, "click", () => exportNotesAsText("txt", { filtered: true }));
 
   on(loadMoreBtn, "click", () => {
     visibleCount += PAGE_SIZE;
@@ -184,6 +231,13 @@ function bindEvents() {
   on(exportIncrementalBtn, "click", exportIncrementalBackup);
   on(importBackupBtn, "click", () => importBackupFile.click());
   on(importBackupFile, "change", importBackupFromFile);
+  on(saveN8nBtn, "click", saveN8nConfig);
+  on(testN8nBtn, "click", testN8nWebhook);
+  on(toggleTrashBtn, "click", () => {
+    trashOpen = !trashOpen;
+    renderTrash();
+  });
+  on(emptyTrashBtn, "click", emptyTrash);
 }
 
 async function runGuidedBackup() {
@@ -192,6 +246,213 @@ async function runGuidedBackup() {
   }
   await exportBackup();
   statusPill.textContent = "Backup esportato. Ora caricalo su Drive/OneDrive.";
+}
+
+function renderN8nConfig() {
+  if (n8nEnabledInput) {
+    n8nEnabledInput.checked = n8nEnabled;
+  }
+  if (n8nWebhookUrlInput) {
+    n8nWebhookUrlInput.value = n8nWebhookUrl;
+  }
+  if (n8nMeta) {
+    if (!n8nWebhookUrl) {
+      n8nMeta.textContent = "Webhook n8n non configurato.";
+    } else if (!n8nEnabled) {
+      n8nMeta.textContent = "Webhook salvato ma disattivato.";
+    } else {
+      n8nMeta.textContent = "Webhook n8n attivo.";
+    }
+  }
+}
+
+async function saveN8nConfig() {
+  n8nEnabled = Boolean(n8nEnabledInput?.checked);
+  n8nWebhookUrl = (n8nWebhookUrlInput?.value || "").trim();
+  if (n8nEnabled && !n8nWebhookUrl) {
+    statusPill.textContent = "Inserisci URL webhook prima di attivarlo";
+    return;
+  }
+
+  await idbPut(IDB.stores.meta, {
+    key: KEYS.n8nConfig,
+    value: {
+      enabled: n8nEnabled,
+      url: n8nWebhookUrl,
+    },
+  });
+  renderN8nConfig();
+  statusPill.textContent = "Configurazione n8n salvata";
+}
+
+function buildN8nPayload(note, eventType, plainText) {
+  return {
+    event: eventType,
+    note: {
+      id: note.id,
+      text: plainText,
+      encrypted: Boolean(note.encrypted),
+      labelIds: note.labelIds || [],
+      pinned: Boolean(note.pinned),
+      createdAt: note.createdAt || null,
+      updatedAt: note.updatedAt || null,
+    },
+    app: {
+      source: "appunti-pwa",
+      time: Date.now(),
+    },
+  };
+}
+
+async function postJsonWithTimeout(url, payload, timeoutMs = 9000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function triggerN8n(eventType, note, plainText) {
+  if (!n8nEnabled || !n8nWebhookUrl) {
+    return;
+  }
+
+  const payload = buildN8nPayload(note, eventType, plainText);
+  postJsonWithTimeout(n8nWebhookUrl, payload).catch(() => {
+  });
+}
+
+async function testN8nWebhook() {
+  const testUrl = (n8nWebhookUrlInput?.value || "").trim();
+  if (!testUrl) {
+    statusPill.textContent = "Inserisci URL webhook da testare";
+    return;
+  }
+
+  try {
+    const response = await postJsonWithTimeout(testUrl, {
+      event: "test",
+      app: {
+        source: "appunti-pwa",
+        time: Date.now(),
+      },
+      message: "Test webhook n8n",
+    });
+    if (!response.ok) {
+      statusPill.textContent = `Test n8n fallito: HTTP ${response.status}`;
+      return;
+    }
+    statusPill.textContent = "Test n8n ok";
+  } catch {
+    statusPill.textContent = "Test n8n fallito: webhook non raggiungibile";
+  }
+}
+
+function renderDictationState(message = "") {
+  if (dictateBtn) {
+    dictateBtn.textContent = dictationActive ? "Stop dettatura" : "Detta";
+    dictateBtn.classList.toggle("primary", dictationActive);
+    dictateBtn.classList.toggle("ghost", !dictationActive);
+  }
+  if (dictationMeta) {
+    if (message) {
+      dictationMeta.textContent = message;
+    } else {
+      dictationMeta.textContent = dictationActive ? "Dettatura in corso..." : "Dettatura non attiva.";
+    }
+  }
+}
+
+function appendDictatedText(chunk) {
+  const text = (chunk || "").trim();
+  if (!text) {
+    return;
+  }
+  const current = noteInput.value || "";
+  noteInput.value = current ? `${current}${current.endsWith(" ") || current.endsWith("\n") ? "" : " "}${text}` : text;
+  noteInput.focus();
+}
+
+function initDictationSupport() {
+  const SR = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+  if (!SR) {
+    if (dictateBtn) {
+      dictateBtn.disabled = true;
+    }
+    if (dictationMeta) {
+      dictationMeta.textContent = "Dettatura non supportata da questo browser.";
+    }
+    return;
+  }
+
+  dictationRecognition = new SR();
+  dictationRecognition.lang = "it-IT";
+  dictationRecognition.continuous = true;
+  dictationRecognition.interimResults = true;
+
+  dictationRecognition.onstart = () => {
+    dictationActive = true;
+    renderDictationState();
+  };
+
+  dictationRecognition.onresult = (event) => {
+    let finalText = "";
+    let interimText = "";
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const piece = event.results[i][0]?.transcript || "";
+      if (event.results[i].isFinal) {
+        finalText += piece;
+      } else {
+        interimText += piece;
+      }
+    }
+    if (finalText) {
+      appendDictatedText(finalText);
+      renderDictationState();
+      return;
+    }
+    if (interimText) {
+      renderDictationState(`Dettatura: ${interimText.trim()}`);
+    }
+  };
+
+  dictationRecognition.onerror = (event) => {
+    dictationActive = false;
+    if (event?.error === "not-allowed") {
+      renderDictationState("Microfono non autorizzato.");
+      return;
+    }
+    renderDictationState("Errore dettatura.");
+  };
+
+  dictationRecognition.onend = () => {
+    dictationActive = false;
+    renderDictationState();
+  };
+
+  renderDictationState();
+}
+
+function toggleDictation() {
+  if (!dictationRecognition) {
+    return;
+  }
+  if (dictationActive) {
+    dictationRecognition.stop();
+    return;
+  }
+  try {
+    dictationRecognition.start();
+  } catch {
+    renderDictationState("Impossibile avviare la dettatura.");
+  }
 }
 
 async function handleSessionPassphraseClick() {
@@ -253,7 +514,7 @@ async function buildDecryptedIndexes(passphrase) {
   let failedCount = 0;
 
   for (const note of notes) {
-    if (!note.encrypted) {
+    if (!note.encrypted || isTrashed(note)) {
       continue;
     }
     totalEncrypted += 1;
@@ -332,6 +593,10 @@ async function exportIncrementalBackup() {
   }
 }
 async function submitNewNote() {
+  if (dictationActive && dictationRecognition) {
+    dictationRecognition.stop();
+  }
+
   const text = noteInput.value.trim();
   if (!text) {
     return;
@@ -347,6 +612,7 @@ async function submitNewNote() {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     pinned: false,
+    trashedAt: null,
     encrypted: false,
   };
 
@@ -381,6 +647,7 @@ async function submitNewNote() {
 
   notes.unshift(note);
   await idbPut(IDB.stores.notes, note);
+  triggerN8n("note.created", note, text);
 
   noteInput.value = "";
   selectedNewLabelIds.clear();
@@ -626,7 +893,7 @@ function getFilteredNotes() {
   const dateTo = dateToInput.value ? new Date(`${dateToInput.value}T23:59:59`).getTime() : null;
   const hideProtected = shouldHideProtectedItems();
 
-  return notes
+  return getActiveNotes()
     .filter((note) => {
       if (hideProtected && (note.encrypted || noteHasProtectedLabel(note))) {
         return false;
@@ -670,6 +937,7 @@ function renderNotes() {
   }
 
   notesList.innerHTML = "";
+  renderTrash();
 
   const filtered = getFilteredNotes();
   currentResults = filtered.slice(0, visibleCount);
@@ -738,6 +1006,167 @@ function setupBatchSentinel(token) {
   );
 
   renderObserver.observe(sentinel);
+}
+
+function getTrashPreview(note) {
+  if (note.encrypted) {
+    if (sessionPassphrase && decryptedNoteTextIndex.has(note.id)) {
+      return decryptedNoteTextIndex.get(note.id) || "";
+    }
+    return "[Nota cifrata]";
+  }
+  return note.text || "";
+}
+
+function cutText(value, maxLength = 90) {
+  if (!value) {
+    return "";
+  }
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function renderTrash() {
+  if (!trashList || !trashMeta || !toggleTrashBtn || !emptyTrashBtn) {
+    return;
+  }
+
+  const trashed = getTrashNotes();
+  const count = trashed.length;
+  toggleTrashBtn.textContent = trashOpen ? "Nascondi cestino" : "Mostra cestino";
+  emptyTrashBtn.disabled = count === 0;
+  trashMeta.textContent = count === 0 ? "Cestino vuoto." : `Nel cestino: ${count} note.`;
+
+  trashList.classList.toggle("hidden", !trashOpen);
+  trashList.innerHTML = "";
+  if (!trashOpen) {
+    return;
+  }
+
+  if (count === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "Nessuna nota cestinata.";
+    trashList.append(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  trashed.forEach((note) => {
+    const row = document.createElement("div");
+    row.className = "trash-row";
+
+    const info = document.createElement("div");
+    const when = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date(note.trashedAt || Date.now()));
+    const labelsText = getNoteLabelNames(note).join(" ");
+    const title = document.createElement("strong");
+    title.textContent = cutText(getTrashPreview(note)) || "(vuota)";
+    const subtitle = document.createElement("span");
+    subtitle.className = "hint";
+    subtitle.textContent = `Cestinata: ${when}${labelsText ? ` - ${labelsText}` : ""}`;
+    info.append(title, document.createElement("br"), subtitle);
+
+    const actions = document.createElement("div");
+    actions.className = "row gap";
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.type = "button";
+    restoreBtn.className = "btn ghost";
+    restoreBtn.textContent = "Ripristina";
+    restoreBtn.addEventListener("click", () => restoreNoteFromTrash(note.id));
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "btn danger";
+    deleteBtn.textContent = "Elimina";
+    deleteBtn.addEventListener("click", () => deleteNotePermanently(note.id));
+
+    actions.append(restoreBtn, deleteBtn);
+    row.append(info, actions);
+    fragment.append(row);
+  });
+
+  trashList.append(fragment);
+}
+
+async function moveNoteToTrash(note) {
+  const updatedNote = {
+    ...note,
+    pinned: false,
+    trashedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  notes = notes.map((entry) => (entry.id === note.id ? updatedNote : entry));
+  await idbPut(IDB.stores.notes, updatedNote);
+  decryptedSearchIndex.delete(note.id);
+  decryptedNoteTextIndex.delete(note.id);
+  statusPill.textContent = "Nota spostata nel cestino";
+  renderNotes();
+}
+
+async function restoreNoteFromTrash(noteId) {
+  const note = notes.find((entry) => entry.id === noteId);
+  if (!note) {
+    return;
+  }
+
+  const restored = {
+    ...note,
+    trashedAt: null,
+    updatedAt: Date.now(),
+  };
+  notes = notes.map((entry) => (entry.id === noteId ? restored : entry));
+  await idbPut(IDB.stores.notes, restored);
+
+  if (restored.encrypted && sessionPassphrase) {
+    try {
+      const plain = await decryptText(restored, sessionPassphrase);
+      decryptedNoteTextIndex.set(restored.id, plain);
+      decryptedSearchIndex.set(restored.id, plain.toLowerCase());
+    } catch {
+      decryptedNoteTextIndex.delete(restored.id);
+      decryptedSearchIndex.delete(restored.id);
+    }
+  }
+
+  statusPill.textContent = "Nota ripristinata";
+  renderNotes();
+}
+
+async function deleteNotePermanently(noteId) {
+  notes = notes.filter((entry) => entry.id !== noteId);
+  await idbDelete(IDB.stores.notes, noteId);
+  decryptedSearchIndex.delete(noteId);
+  decryptedNoteTextIndex.delete(noteId);
+  statusPill.textContent = "Nota eliminata definitivamente";
+  renderNotes();
+}
+
+async function emptyTrash() {
+  const trashed = getTrashNotes();
+  if (trashed.length === 0) {
+    statusPill.textContent = "Cestino gia vuoto";
+    return;
+  }
+
+  const confirmed = window.confirm(`Eliminare definitivamente ${trashed.length} note dal cestino?`);
+  if (!confirmed) {
+    return;
+  }
+
+  for (const note of trashed) {
+    await idbDelete(IDB.stores.notes, note.id);
+    decryptedSearchIndex.delete(note.id);
+    decryptedNoteTextIndex.delete(note.id);
+  }
+  const trashedIds = new Set(trashed.map((n) => n.id));
+  notes = notes.filter((entry) => !trashedIds.has(entry.id));
+
+  statusPill.textContent = "Cestino svuotato";
+  renderNotes();
 }
 
 function renderNoteItem(note) {
@@ -811,11 +1240,7 @@ function renderNoteItem(note) {
   });
 
   deleteBtn.addEventListener("click", async () => {
-    notes = notes.filter((entry) => entry.id !== note.id);
-    await idbDelete(IDB.stores.notes, note.id);
-    decryptedSearchIndex.delete(note.id);
-    decryptedNoteTextIndex.delete(note.id);
-    renderNotes();
+    await moveNoteToTrash(note);
   });
 
   return fragment;
@@ -903,6 +1328,7 @@ function enterEditMode(item, note) {
 
     notes = notes.map((entry) => (entry.id === note.id ? updatedNote : entry));
     await idbPut(IDB.stores.notes, updatedNote);
+    triggerN8n("note.updated", updatedNote, text);
 
     if (updatedNote.encrypted) {
       if (sessionPassphrase) {
@@ -949,6 +1375,14 @@ function getNoteExportText(note) {
   return note.text || "";
 }
 
+function getNotesForExport(options = {}) {
+  const { filtered = false } = options;
+  if (filtered) {
+    return getFilteredNotes();
+  }
+  return [...getActiveNotes()].sort(compareNotes);
+}
+
 function getNoteLabelNames(note) {
   return (note.labelIds || [])
     .map((labelId) => labels.find((entry) => entry.id === labelId))
@@ -966,12 +1400,13 @@ function downloadTextFile(content, filename, mimeType) {
   URL.revokeObjectURL(url);
 }
 
-function exportNotesAsText(format) {
-  const sorted = [...notes].sort(compareNotes);
+function exportNotesAsText(format, options = {}) {
+  const { filtered = false } = options;
+  const sorted = getNotesForExport({ filtered });
   const exportedAt = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date());
   const encryptedLockedCount = sorted.filter((note) => note.encrypted && !(sessionPassphrase && decryptedNoteTextIndex.has(note.id))).length;
   const extension = format === "md" ? "md" : "txt";
-  const filename = `appunti-export.${extension}`;
+  const filename = filtered ? `appunti-filtrati.${extension}` : `appunti-export.${extension}`;
 
   if (format === "md") {
     const lines = ["# Appunti", "", `Esportato: ${exportedAt}`, ""];
@@ -1004,10 +1439,38 @@ function exportNotesAsText(format) {
   }
 
   if (encryptedLockedCount > 0) {
-    statusPill.textContent = `Export ${extension.toUpperCase()} completato (${encryptedLockedCount} note cifrate senza testo)`;
+    statusPill.textContent = `Export ${extension.toUpperCase()} ${filtered ? "filtrato " : ""}completato (${encryptedLockedCount} note cifrate senza testo)`;
   } else {
-    statusPill.textContent = `Export ${extension.toUpperCase()} completato`;
+    statusPill.textContent = `Export ${extension.toUpperCase()} ${filtered ? "filtrato " : ""}completato`;
   }
+}
+
+function exportFilteredJson() {
+  const filteredNotes = getNotesForExport({ filtered: true });
+  const payload = {
+    version: 1,
+    filtered: true,
+    exportedAt: Date.now(),
+    filters: {
+      text: searchInput.value.trim(),
+      dateFrom: dateFromInput.value || null,
+      dateTo: dateToInput.value || null,
+      labelIds: Array.from(searchLabelIds),
+      hideProtected: shouldHideProtectedItems(),
+    },
+    labels,
+    notes: filteredNotes,
+  };
+
+  const content = JSON.stringify(payload, null, 2);
+  const blob = new Blob([content], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "appunti-filtrati.json";
+  a.click();
+  URL.revokeObjectURL(url);
+  statusPill.textContent = `Export filtrato JSON completato (${filteredNotes.length} note)`;
 }
 
 async function exportBackup() {
@@ -1125,6 +1588,7 @@ function mergeBackup(data) {
         text: "",
         encrypted: true,
         pinned: note.pinned === true,
+        trashedAt: Number.isFinite(note.trashedAt) ? note.trashedAt : null,
         cipherText: note.cipherText,
         iv: note.iv,
         salt: note.salt,
@@ -1151,6 +1615,7 @@ function mergeBackup(data) {
         text: normalizedText,
         encrypted: false,
         pinned: note.pinned === true,
+        trashedAt: Number.isFinite(note.trashedAt) ? note.trashedAt : null,
         labelIds: mappedLabelIds,
         createdAt: Number.isFinite(note.createdAt) ? note.createdAt : Date.now(),
         updatedAt: Number.isFinite(note.updatedAt) ? note.updatedAt : Number.isFinite(note.createdAt) ? note.createdAt : Date.now(),

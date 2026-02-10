@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v6</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v8</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -34,8 +34,11 @@
         </label>
         <p id="encrypted-search-meta" class="hint">Sessione bloccata: ricerca cifrate disattiva.</p>
         <div id="search-labels" class="row wrap gap top-space"></div>
-        <div class="row gap top-space">
+        <div class="row wrap gap top-space">
           <button id="clear-filters" class="btn ghost" type="button">Pulisci filtri</button>
+          <button id="export-filtered-json-btn" class="btn ghost" type="button">Esporta risultati JSON</button>
+          <button id="export-filtered-md-btn" class="btn ghost" type="button">MD</button>
+          <button id="export-filtered-txt-btn" class="btn ghost" type="button">TXT</button>
         </div>
       </section>
 
@@ -50,6 +53,30 @@
         </div>
         <p class="hint">Le etichette protette cifrano il testo. Con passphrase di sessione attiva non viene richiesta ogni volta.</p>
         <div id="all-labels" class="row wrap gap top-space"></div>
+      </section>
+
+      <section class="menu-section">
+        <h3>Automazioni n8n</h3>
+        <label class="hint">
+          <input id="n8n-enabled" type="checkbox" />
+          Attiva invio note a webhook n8n
+        </label>
+        <input id="n8n-webhook-url" class="input top-space" type="url" placeholder="https://tuo-n8n/webhook/..." autocomplete="off" />
+        <div class="row wrap gap top-space">
+          <button id="save-n8n-btn" class="btn ghost" type="button">Salva webhook</button>
+          <button id="test-n8n-btn" class="btn ghost" type="button">Test webhook</button>
+        </div>
+        <p id="n8n-meta" class="hint">Webhook n8n non configurato.</p>
+      </section>
+
+      <section class="menu-section">
+        <h3>Cestino</h3>
+        <div class="row wrap gap">
+          <button id="toggle-trash-btn" class="btn ghost" type="button">Mostra cestino</button>
+          <button id="empty-trash-btn" class="btn danger" type="button">Svuota cestino</button>
+        </div>
+        <p id="trash-meta" class="hint">Cestino vuoto.</p>
+        <div id="trash-list" class="top-space hidden"></div>
       </section>
 
       <section class="menu-section">
@@ -102,9 +129,11 @@
             placeholder="Scrivi il tuo appunto. Vai a capo liberamente, poi premi Invia."
           ></textarea>
         </div>
-        <div class="top-space">
+        <div class="row gap top-space">
           <button id="add-note-btn" class="btn primary" type="button">Invia</button>
+          <button id="dictate-btn" class="btn ghost" type="button">Detta</button>
         </div>
+        <p id="dictation-meta" class="hint">Dettatura non attiva.</p>
         <div id="quick-labels" class="row wrap gap top-space"></div>
       </section>
 
@@ -124,7 +153,7 @@
           <div class="note-actions">
             <button class="btn ghost pin-btn" type="button">Pin</button>
             <button class="btn ghost edit-btn" type="button">Modifica</button>
-            <button class="btn danger delete-btn" type="button">Elimina</button>
+            <button class="btn danger delete-btn" type="button">Cestina</button>
           </div>
         </div>
         <div class="note-meta"></div>

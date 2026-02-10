@@ -36,4 +36,5 @@ h2{margin:0 0 10px;font-size:1rem}
 .label-name{font-size:.9rem}
 .label-row.protected{border-color:#d9b26a;background:#fff8e8}
 .protected-pill{font-size:.75rem;padding:3px 7px;border-radius:999px;background:#ffe9bf;color:#704600}
+.trash-row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfdfd;margin-bottom:8px}
 
