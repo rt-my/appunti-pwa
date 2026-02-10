@@ -18,6 +18,7 @@ const IDB = {
 
 const PAGE_SIZE = 100;
 const RENDER_BATCH_SIZE = 40;
+const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 const statusPill = document.getElementById("status-pill");
 const backupMeta = document.getElementById("backup-meta");
@@ -86,6 +87,8 @@ let renderObserver = null;
 let renderToken = 0;
 let searchDebounceTimer = null;
 let sessionPassphrase = null;
+let sessionIdleTimer = null;
+let sessionActivityWatchersInstalled = false;
 let trashOpen = false;
 let n8nEnabled = false;
 let n8nWebhookUrl = "";
@@ -93,6 +96,9 @@ let n8nEncryptJson = false;
 let n8nOnlyFiltered = false;
 let dictationRecognition = null;
 let dictationActive = false;
+let dictationRequested = false;
+let lastDictationFinalNorm = "";
+let lastDictationFinalAt = 0;
 const decryptedSearchIndex = new Map();
 const decryptedNoteTextIndex = new Map();
 
@@ -246,6 +252,52 @@ function bindEvents() {
     renderTrash();
   });
   on(emptyTrashBtn, "click", emptyTrash);
+  setupSessionInactivityWatcher();
+}
+
+function setupSessionInactivityWatcher() {
+  if (sessionActivityWatchersInstalled) {
+    return;
+  }
+  sessionActivityWatchersInstalled = true;
+
+  const activityEvents = ["pointerdown", "keydown", "touchstart"];
+  for (const eventName of activityEvents) {
+    document.addEventListener(eventName, touchSessionActivity, { passive: true });
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      touchSessionActivity();
+    }
+  });
+
+  window.addEventListener("focus", touchSessionActivity);
+}
+
+function touchSessionActivity() {
+  if (!sessionPassphrase) {
+    return;
+  }
+  armSessionIdleTimer();
+}
+
+function stopSessionIdleTimer() {
+  if (sessionIdleTimer) {
+    clearTimeout(sessionIdleTimer);
+    sessionIdleTimer = null;
+  }
+}
+
+function armSessionIdleTimer() {
+  stopSessionIdleTimer();
+  sessionIdleTimer = setTimeout(() => {
+    if (!sessionPassphrase) {
+      return;
+    }
+    clearSessionPassphrase();
+    statusPill.textContent = "Sessione bloccata automaticamente dopo 10 minuti di inattivita";
+  }, SESSION_IDLE_TIMEOUT_MS);
 }
 
 async function runGuidedBackup() {
@@ -515,7 +567,14 @@ function initDictationSupport() {
       }
     }
     if (finalText) {
-      appendDictatedText(finalText);
+      const normalized = finalText.trim().replace(/\s+/g, " ").toLowerCase();
+      const now = Date.now();
+      const isDuplicate = normalized && normalized === lastDictationFinalNorm && now - lastDictationFinalAt < 4000;
+      if (!isDuplicate) {
+        appendDictatedText(finalText);
+        lastDictationFinalNorm = normalized;
+        lastDictationFinalAt = now;
+      }
       renderDictationState();
       return;
     }
@@ -526,8 +585,14 @@ function initDictationSupport() {
 
   dictationRecognition.onerror = (event) => {
     dictationActive = false;
-    if (event?.error === "not-allowed") {
+    const errorCode = event?.error || "";
+    if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
+      dictationRequested = false;
       renderDictationState("Microfono non autorizzato.");
+      return;
+    }
+    if (errorCode === "aborted" && !dictationRequested) {
+      renderDictationState();
       return;
     }
     renderDictationState("Errore dettatura.");
@@ -535,6 +600,19 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
+    if (dictationRequested) {
+      setTimeout(() => {
+        if (!dictationRequested || dictationActive) {
+          return;
+        }
+        try {
+          dictationRecognition.start();
+        } catch {
+          renderDictationState("Dettatura interrotta.");
+        }
+      }, 180);
+      return;
+    }
     renderDictationState();
   };
 
@@ -545,13 +623,18 @@ function toggleDictation() {
   if (!dictationRecognition) {
     return;
   }
-  if (dictationActive) {
+  if (dictationActive || dictationRequested) {
+    dictationRequested = false;
     dictationRecognition.stop();
     return;
   }
   try {
+    dictationRequested = true;
+    lastDictationFinalNorm = "";
+    lastDictationFinalAt = 0;
     dictationRecognition.start();
   } catch {
+    dictationRequested = false;
     renderDictationState("Impossibile avviare la dettatura.");
   }
 }
@@ -581,6 +664,7 @@ async function handleSessionPassphraseClick() {
 }
 
 function clearSessionPassphrase() {
+  stopSessionIdleTimer();
   sessionPassphrase = null;
   decryptedSearchIndex.clear();
   decryptedNoteTextIndex.clear();
@@ -598,6 +682,7 @@ async function applySessionPassphrase(passphrase) {
   }
 
   sessionPassphrase = passphrase;
+  armSessionIdleTimer();
   if (sessionPassphraseBtn) {
     sessionPassphraseBtn.textContent = "Blocca sessione";
   }
@@ -695,6 +780,7 @@ async function exportIncrementalBackup() {
 }
 async function submitNewNote() {
   if (dictationActive && dictationRecognition) {
+    dictationRequested = false;
     dictationRecognition.stop();
   }
 
