@@ -97,6 +97,7 @@ let n8nOnlyFiltered = false;
 let dictationRecognition = null;
 let dictationActive = false;
 let dictationRequested = false;
+let dictationStopping = false;
 let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
 const decryptedSearchIndex = new Map();
@@ -533,6 +534,62 @@ function appendDictatedText(chunk) {
   noteInput.focus();
 }
 
+function normalizeDictationText(value) {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\u00c0-\u024f\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function appendDictatedTextUnique(chunk) {
+  const rawChunk = (chunk || "").trim();
+  if (!rawChunk) {
+    return false;
+  }
+
+  const normalizedChunk = normalizeDictationText(rawChunk);
+  if (!normalizedChunk) {
+    return false;
+  }
+
+  const now = Date.now();
+  const isRecentDuplicate = normalizedChunk === lastDictationFinalNorm && now - lastDictationFinalAt < 12000;
+  if (isRecentDuplicate) {
+    return false;
+  }
+
+  const currentRaw = noteInput.value || "";
+  const tailNormalized = normalizeDictationText(currentRaw.slice(-1200));
+  if (tailNormalized.endsWith(normalizedChunk)) {
+    return false;
+  }
+
+  const currentWords = currentRaw.trim() ? currentRaw.trim().split(/\s+/) : [];
+  const chunkWords = rawChunk.split(/\s+/);
+
+  let overlapWords = 0;
+  const maxOverlap = Math.min(20, currentWords.length, chunkWords.length);
+  for (let size = maxOverlap; size >= 1; size -= 1) {
+    const left = normalizeDictationText(currentWords.slice(-size).join(" "));
+    const right = normalizeDictationText(chunkWords.slice(0, size).join(" "));
+    if (left && left === right) {
+      overlapWords = size;
+      break;
+    }
+  }
+
+  const textToAppend = overlapWords > 0 ? chunkWords.slice(overlapWords).join(" ").trim() : rawChunk;
+  if (!textToAppend) {
+    return false;
+  }
+
+  appendDictatedText(textToAppend);
+  lastDictationFinalNorm = normalizedChunk;
+  lastDictationFinalAt = now;
+  return true;
+}
+
 function initDictationSupport() {
   const SR = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
   if (!SR) {
@@ -551,36 +608,33 @@ function initDictationSupport() {
   dictationRecognition.interimResults = true;
 
   dictationRecognition.onstart = () => {
+    dictationStopping = false;
     dictationActive = true;
     renderDictationState();
   };
 
   dictationRecognition.onresult = (event) => {
-    let finalText = "";
+    const finalChunks = [];
     let interimText = "";
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const piece = event.results[i][0]?.transcript || "";
       if (event.results[i].isFinal) {
-        finalText += piece;
+        finalChunks.push(piece);
       } else {
         interimText += piece;
       }
     }
+    const finalText = finalChunks.join(" ").trim();
     if (finalText) {
-      const normalized = finalText.trim().replace(/\s+/g, " ").toLowerCase();
-      const now = Date.now();
-      const isDuplicate = normalized && normalized === lastDictationFinalNorm && now - lastDictationFinalAt < 4000;
-      if (!isDuplicate) {
-        appendDictatedText(finalText);
-        lastDictationFinalNorm = normalized;
-        lastDictationFinalAt = now;
-      }
+      appendDictatedTextUnique(finalText);
       renderDictationState();
       return;
     }
     if (interimText) {
       renderDictationState(`Dettatura: ${interimText.trim()}`);
+      return;
     }
+    renderDictationState();
   };
 
   dictationRecognition.onerror = (event) => {
@@ -588,7 +642,11 @@ function initDictationSupport() {
     const errorCode = event?.error || "";
     if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
       dictationRequested = false;
+      dictationStopping = false;
       renderDictationState("Microfono non autorizzato.");
+      return;
+    }
+    if (errorCode === "aborted" && dictationStopping) {
       return;
     }
     if (errorCode === "aborted" && !dictationRequested) {
@@ -600,7 +658,7 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
-    if (dictationRequested) {
+    if (dictationRequested && !dictationStopping) {
       setTimeout(() => {
         if (!dictationRequested || dictationActive) {
           return;
@@ -608,11 +666,13 @@ function initDictationSupport() {
         try {
           dictationRecognition.start();
         } catch {
+          dictationRequested = false;
           renderDictationState("Dettatura interrotta.");
         }
-      }, 180);
+      }, 200);
       return;
     }
+    dictationStopping = false;
     renderDictationState();
   };
 
@@ -625,16 +685,24 @@ function toggleDictation() {
   }
   if (dictationActive || dictationRequested) {
     dictationRequested = false;
-    dictationRecognition.stop();
+    dictationStopping = true;
+    try {
+      dictationRecognition.abort();
+    } catch {
+      dictationRecognition.stop();
+    }
+    renderDictationState("Dettatura in arresto...");
     return;
   }
   try {
     dictationRequested = true;
+    dictationStopping = false;
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
     dictationRecognition.start();
   } catch {
     dictationRequested = false;
+    dictationStopping = false;
     renderDictationState("Impossibile avviare la dettatura.");
   }
 }
@@ -779,9 +847,14 @@ async function exportIncrementalBackup() {
   }
 }
 async function submitNewNote() {
-  if (dictationActive && dictationRecognition) {
+  if ((dictationActive || dictationRequested) && dictationRecognition) {
     dictationRequested = false;
-    dictationRecognition.stop();
+    dictationStopping = true;
+    try {
+      dictationRecognition.abort();
+    } catch {
+      dictationRecognition.stop();
+    }
   }
 
   const text = noteInput.value.trim();
