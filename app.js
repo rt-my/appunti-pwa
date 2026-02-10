@@ -102,7 +102,6 @@ let dictationStopping = false;
 let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
 let dictationLastFinalRaw = "";
-const dictationRecentSegments = [];
 const dictationDebugEntries = [];
 let dictationRestartAttempt = 0;
 let dictationRestartFailures = 0;
@@ -628,38 +627,6 @@ function deriveIncrementFromFinal(previousRaw, currentRaw) {
   return currTokens.map((t) => t.raw).join(" ").trim();
 }
 
-function trimOldDictationSegments(now = Date.now()) {
-  const maxAgeMs = 15000;
-  while (dictationRecentSegments.length > 0 && now - dictationRecentSegments[0].at > maxAgeMs) {
-    dictationRecentSegments.shift();
-  }
-}
-
-function pushRecentDictationSegment(normalizedText, now = Date.now()) {
-  if (!normalizedText) {
-    return;
-  }
-  trimOldDictationSegments(now);
-  dictationRecentSegments.push({
-    norm: normalizedText,
-    words: normalizedText.split(" ").filter(Boolean).length,
-    at: now,
-  });
-}
-
-function isNearDuplicateSegment(normalizedText, now = Date.now()) {
-  if (!normalizedText) {
-    return false;
-  }
-  trimOldDictationSegments(now);
-  for (const segment of dictationRecentSegments) {
-    if (segment.norm === normalizedText) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function appendDictatedTextUnique(chunk) {
   const rawChunk = (chunk || "").trim();
   if (!rawChunk) {
@@ -672,54 +639,25 @@ function appendDictatedTextUnique(chunk) {
   }
 
   const now = Date.now();
-  const isRecentDuplicate = normalizedChunk === lastDictationFinalNorm && now - lastDictationFinalAt < 15000;
+  const isRecentDuplicate = normalizedChunk === lastDictationFinalNorm && now - lastDictationFinalAt < 3000;
   if (isRecentDuplicate) {
     return { ok: false, reason: "same-recent" };
-  }
-  if (isNearDuplicateSegment(normalizedChunk, now)) {
-    return { ok: false, reason: "seen-recent-buffer" };
   }
 
   const currentRaw = noteInput.value || "";
   const tailNormalized = normalizeDictationText(currentRaw.slice(-1600));
+  const normalizedWordCount = normalizedChunk.split(" ").filter(Boolean).length;
   if (tailNormalized.endsWith(normalizedChunk)) {
     return { ok: false, reason: "already-tail" };
   }
-
-  const currentWords = currentRaw.trim() ? currentRaw.trim().split(/\s+/) : [];
-  const chunkWords = rawChunk.split(/\s+/);
-
-  let overlapWords = 0;
-  const maxOverlap = Math.min(40, currentWords.length, chunkWords.length);
-  for (let size = maxOverlap; size >= 1; size -= 1) {
-    const left = normalizeDictationText(currentWords.slice(-size).join(" "));
-    const right = normalizeDictationText(chunkWords.slice(0, size).join(" "));
-    if (left && left === right) {
-      overlapWords = size;
-      break;
-    }
+  if (normalizedWordCount >= 6 && tailNormalized.includes(normalizedChunk)) {
+    return { ok: false, reason: "already-tail-contains" };
   }
 
-  const textToAppend = overlapWords > 0 ? chunkWords.slice(overlapWords).join(" ").trim() : rawChunk;
-  if (!textToAppend) {
-    return { ok: false, reason: "fully-overlap" };
-  }
-  const normalizedAppend = normalizeDictationText(textToAppend);
-  if (!normalizedAppend) {
-    return { ok: false, reason: "append-empty" };
-  }
-  if (isNearDuplicateSegment(normalizedAppend, now)) {
-    return { ok: false, reason: "append-seen-buffer" };
-  }
-
-  appendDictatedText(textToAppend);
+  appendDictatedText(rawChunk);
   lastDictationFinalNorm = normalizedChunk;
   lastDictationFinalAt = now;
-  pushRecentDictationSegment(normalizedChunk, now);
-  if (normalizedAppend !== normalizedChunk) {
-    pushRecentDictationSegment(normalizedAppend, now);
-  }
-  return { ok: true, reason: "appended", text: textToAppend };
+  return { ok: true, reason: "appended", text: rawChunk };
 }
 
 function initDictationSupport() {
@@ -891,7 +829,6 @@ function toggleDictation() {
     dictationRequested = true;
     dictationStopping = false;
     dictationLastFinalRaw = "";
-    dictationRecentSegments.length = 0;
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
     dictationRestartAttempt = 0;
