@@ -1,0 +1,137 @@
+﻿<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d7a5f" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Appunti" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.svg" />
+    <title>Appunti Locali</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu</button>
+
+    <aside id="side-menu" class="side-menu" aria-hidden="true">
+      <div class="menu-head">
+        <h2>Menu</h2>
+        <button id="menu-close" class="btn ghost" type="button">Chiudi</button>
+      </div>
+
+      <section class="menu-section">
+        <h3>Ricerca note</h3>
+        <input id="search-input" class="input" type="text" placeholder="Cerca nel testo" autocomplete="off" />
+        <div class="row gap top-space">
+          <input id="date-from" class="input" type="date" />
+          <input id="date-to" class="input" type="date" />
+        </div>
+        <div class="row wrap gap top-space">
+          <button id="unlock-search-btn" class="btn ghost" type="button">Sblocca ricerca cifrate</button>
+          <button id="lock-search-btn" class="btn ghost" type="button">Blocca ricerca cifrate</button>
+        </div>
+        <p id="encrypted-search-meta" class="hint">Ricerca cifrate: disattiva.</p>
+        <div id="search-labels" class="row wrap gap top-space"></div>
+        <div class="row gap top-space">
+          <button id="clear-filters" class="btn ghost" type="button">Pulisci filtri</button>
+        </div>
+      </section>
+
+      <section class="menu-section">
+        <h3>Gestione etichette</h3>
+        <div class="row gap">
+          <input id="label-input" class="input" type="text" placeholder="Nuova etichetta" autocomplete="off" />
+          <button id="add-label-btn" class="btn primary" type="button">Aggiungi</button>
+        </div>
+        <div class="row wrap gap top-space">
+          <button id="set-passphrase-btn" class="btn ghost" type="button">Imposta passphrase sessione</button>
+          <button id="clear-passphrase-btn" class="btn ghost" type="button">Blocca sessione</button>
+        </div>
+        <p class="hint">Le etichette protette cifrano il testo. Con passphrase di sessione attiva non viene richiesta ogni volta.</p>
+        <div id="all-labels" class="row wrap gap top-space"></div>
+      </section>
+
+      <section class="menu-section">
+        <h3>Backup</h3>
+        <div class="row wrap gap">
+          <button id="backup-guide-btn" class="btn ghost" type="button">Backup guidato</button>
+          <button id="export-backup-btn" class="btn primary" type="button">Esporta JSON</button>
+          <button id="export-incremental-btn" class="btn ghost" type="button">Esporta incrementale</button>
+          <button id="import-backup-btn" class="btn ghost" type="button">Importa JSON</button>
+          <input id="import-backup-file" type="file" accept="application/json" class="hidden" />
+        </div>
+        <p id="backup-meta" class="hint">Nessun backup registrato.</p>
+        <p id="backup-incremental-meta" class="hint">Incrementale: mai eseguito.</p>
+        <p id="backup-warning" class="hint warning-text hidden"></p>
+        <div id="backup-guide" class="backup-guide hidden">
+          <p class="hint">
+            Flusso rapido:
+            1) premi <strong>Esporta JSON</strong>
+            2) carica il file su Drive/OneDrive
+            3) su altro dispositivo usa <strong>Importa JSON</strong>.
+          </p>
+          <p class="hint">
+            Android:
+            dopo il download apri il file e scegli condividi verso Drive/OneDrive.
+          </p>
+          <div class="row wrap gap top-space">
+            <a class="btn ghost" href="https://drive.google.com" target="_blank" rel="noopener noreferrer">Apri Google Drive</a>
+            <a class="btn ghost" href="https://onedrive.live.com" target="_blank" rel="noopener noreferrer">Apri OneDrive</a>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <div id="menu-overlay" class="menu-overlay hidden"></div>
+
+    <main class="app-shell">
+      <header class="app-header">
+        <h1>Appunti</h1>
+        <span id="status-pill" class="status-pill">Pronto</span>
+      </header>
+
+      <section class="card">
+        <h2>Nuovo appunto</h2>
+        <div class="row gap">
+          <textarea
+            id="note-input"
+            class="textarea"
+            placeholder="Scrivi il tuo appunto. Vai a capo liberamente, poi premi Invia."
+          ></textarea>
+        </div>
+        <div class="top-space">
+          <button id="add-note-btn" class="btn primary" type="button">Invia</button>
+        </div>
+        <div id="quick-labels" class="row wrap gap top-space"></div>
+      </section>
+
+      <section class="card">
+        <h2>Appunti salvati</h2>
+        <ul id="notes-list" class="notes-list"></ul>
+        <div class="top-space">
+          <button id="load-more-btn" class="btn ghost hidden" type="button">Carica altri 100</button>
+        </div>
+      </section>
+    </main>
+
+    <template id="note-template">
+      <li class="note-item">
+        <div class="note-top">
+          <p class="note-text"></p>
+          <div class="note-actions">
+            <button class="btn ghost edit-btn" type="button">Modifica</button>
+            <button class="btn danger delete-btn" type="button">Elimina</button>
+          </div>
+        </div>
+        <div class="note-meta"></div>
+        <div class="note-labels"></div>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
+
+
