@@ -66,9 +66,11 @@ const notesList = document.getElementById("notes-list");
 const loadMoreBtn = document.getElementById("load-more-btn");
 const noteTemplate = document.getElementById("note-template");
 const n8nEnabledInput = document.getElementById("n8n-enabled");
+const n8nEncryptJsonInput = document.getElementById("n8n-encrypt-json");
 const n8nWebhookUrlInput = document.getElementById("n8n-webhook-url");
 const saveN8nBtn = document.getElementById("save-n8n-btn");
 const testN8nBtn = document.getElementById("test-n8n-btn");
+const sendJsonN8nBtn = document.getElementById("send-json-n8n-btn");
 const n8nMeta = document.getElementById("n8n-meta");
 
 let db = null;
@@ -86,6 +88,7 @@ let sessionPassphrase = null;
 let trashOpen = false;
 let n8nEnabled = false;
 let n8nWebhookUrl = "";
+let n8nEncryptJson = false;
 let dictationRecognition = null;
 let dictationActive = false;
 const decryptedSearchIndex = new Map();
@@ -153,6 +156,7 @@ async function initApp() {
     if (n8nConfigMeta?.value && typeof n8nConfigMeta.value === "object") {
       n8nEnabled = Boolean(n8nConfigMeta.value.enabled);
       n8nWebhookUrl = typeof n8nConfigMeta.value.url === "string" ? n8nConfigMeta.value.url.trim() : "";
+      n8nEncryptJson = Boolean(n8nConfigMeta.value.encryptJson);
     }
 
     labels.sort((a, b) => a.name.localeCompare(b.name, "it"));
@@ -233,6 +237,7 @@ function bindEvents() {
   on(importBackupFile, "change", importBackupFromFile);
   on(saveN8nBtn, "click", saveN8nConfig);
   on(testN8nBtn, "click", testN8nWebhook);
+  on(sendJsonN8nBtn, "click", sendJsonToN8n);
   on(toggleTrashBtn, "click", () => {
     trashOpen = !trashOpen;
     renderTrash();
@@ -252,22 +257,31 @@ function renderN8nConfig() {
   if (n8nEnabledInput) {
     n8nEnabledInput.checked = n8nEnabled;
   }
+  if (n8nEncryptJsonInput) {
+    n8nEncryptJsonInput.checked = n8nEncryptJson;
+  }
   if (n8nWebhookUrlInput) {
     n8nWebhookUrlInput.value = n8nWebhookUrl;
+  }
+  if (sendJsonN8nBtn) {
+    sendJsonN8nBtn.disabled = !n8nEnabled || !n8nWebhookUrl;
   }
   if (n8nMeta) {
     if (!n8nWebhookUrl) {
       n8nMeta.textContent = "Webhook n8n non configurato.";
     } else if (!n8nEnabled) {
-      n8nMeta.textContent = "Webhook salvato ma disattivato.";
+      n8nMeta.textContent = "Webhook salvato ma integrazione disattivata.";
+    } else if (n8nEncryptJson) {
+      n8nMeta.textContent = "Webhook n8n attivo (invio JSON cifrato).";
     } else {
-      n8nMeta.textContent = "Webhook n8n attivo.";
+      n8nMeta.textContent = "Webhook n8n attivo (invio JSON in chiaro).";
     }
   }
 }
 
 async function saveN8nConfig() {
   n8nEnabled = Boolean(n8nEnabledInput?.checked);
+  n8nEncryptJson = Boolean(n8nEncryptJsonInput?.checked);
   n8nWebhookUrl = (n8nWebhookUrlInput?.value || "").trim();
   if (n8nEnabled && !n8nWebhookUrl) {
     statusPill.textContent = "Inserisci URL webhook prima di attivarlo";
@@ -279,24 +293,20 @@ async function saveN8nConfig() {
     value: {
       enabled: n8nEnabled,
       url: n8nWebhookUrl,
+      encryptJson: n8nEncryptJson,
     },
   });
   renderN8nConfig();
   statusPill.textContent = "Configurazione n8n salvata";
 }
 
-function buildN8nPayload(note, eventType, plainText) {
+function buildN8nBackupPayload() {
   return {
-    event: eventType,
-    note: {
-      id: note.id,
-      text: plainText,
-      encrypted: Boolean(note.encrypted),
-      labelIds: note.labelIds || [],
-      pinned: Boolean(note.pinned),
-      createdAt: note.createdAt || null,
-      updatedAt: note.updatedAt || null,
-    },
+    version: 1,
+    exportedAt: Date.now(),
+    labels,
+    protectedLabelIds: Array.from(protectedLabelIds),
+    notes,
     app: {
       source: "appunti-pwa",
       time: Date.now(),
@@ -319,14 +329,61 @@ async function postJsonWithTimeout(url, payload, timeoutMs = 9000) {
   }
 }
 
-function triggerN8n(eventType, note, plainText) {
-  if (!n8nEnabled || !n8nWebhookUrl) {
+async function sendJsonToN8n() {
+  const targetUrl = (n8nWebhookUrlInput?.value || "").trim();
+  if (!targetUrl) {
+    statusPill.textContent = "Inserisci URL webhook";
+    return;
+  }
+  if (!n8nEnabled) {
+    statusPill.textContent = "Abilita integrazione n8n prima dell'invio";
     return;
   }
 
-  const payload = buildN8nPayload(note, eventType, plainText);
-  postJsonWithTimeout(n8nWebhookUrl, payload).catch(() => {
-  });
+  const backupPayload = buildN8nBackupPayload();
+  let requestPayload = {
+    event: "backup.plain",
+    encrypted: false,
+    data: backupPayload,
+  };
+
+  if (n8nEncryptJson) {
+    const passphrase = window.prompt("Passphrase per cifrare il JSON da inviare a n8n:");
+    if (!passphrase) {
+      statusPill.textContent = "Invio annullato: passphrase mancante";
+      return;
+    }
+    try {
+      const encrypted = await encryptText(JSON.stringify(backupPayload), passphrase);
+      requestPayload = {
+        event: "backup.encrypted",
+        encrypted: true,
+        cipherText: encrypted.cipherText,
+        iv: encrypted.iv,
+        salt: encrypted.salt,
+        meta: {
+          noteCount: notes.length,
+          activeNoteCount: getActiveNotes().length,
+          labelCount: labels.length,
+          exportedAt: backupPayload.exportedAt,
+        },
+      };
+    } catch {
+      statusPill.textContent = "Errore cifratura JSON per n8n";
+      return;
+    }
+  }
+
+  try {
+    const response = await postJsonWithTimeout(targetUrl, requestPayload);
+    if (!response.ok) {
+      statusPill.textContent = `Invio JSON n8n fallito: HTTP ${response.status}`;
+      return;
+    }
+    statusPill.textContent = "JSON inviato a n8n";
+  } catch {
+    statusPill.textContent = "Invio JSON n8n fallito: webhook non raggiungibile";
+  }
 }
 
 async function testN8nWebhook() {
@@ -647,7 +704,6 @@ async function submitNewNote() {
 
   notes.unshift(note);
   await idbPut(IDB.stores.notes, note);
-  triggerN8n("note.created", note, text);
 
   noteInput.value = "";
   selectedNewLabelIds.clear();
@@ -774,10 +830,54 @@ function buildManageLabelRow(label) {
   encryptExistingBtn.disabled = !protectedLabelIds.has(label.id);
   encryptExistingBtn.addEventListener("click", () => encryptExistingNotesForLabel(label));
 
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "btn danger";
+  deleteBtn.textContent = "Elimina";
+  deleteBtn.addEventListener("click", () => deleteLabel(label));
+
   right.append(encryptExistingBtn);
   right.append(toggleBtn);
+  right.append(deleteBtn);
   row.append(left, right);
   return row;
+}
+
+async function deleteLabel(label) {
+  const confirmed = window.confirm(`Eliminare etichetta #${label.name}? Sara rimossa da tutte le note.`);
+  if (!confirmed) {
+    return;
+  }
+
+  labels = labels.filter((entry) => entry.id !== label.id);
+  selectedNewLabelIds.delete(label.id);
+  searchLabelIds.delete(label.id);
+  protectedLabelIds.delete(label.id);
+
+  const changedNotes = [];
+  notes = notes.map((note) => {
+    const noteLabelIds = note.labelIds || [];
+    if (!noteLabelIds.includes(label.id)) {
+      return note;
+    }
+    const updated = {
+      ...note,
+      labelIds: noteLabelIds.filter((id) => id !== label.id),
+      updatedAt: Date.now(),
+    };
+    changedNotes.push(updated);
+    return updated;
+  });
+
+  await idbDelete(IDB.stores.labels, label.id);
+  if (changedNotes.length > 0) {
+    await idbBulkPut(IDB.stores.notes, changedNotes);
+  }
+  await persistProtectedLabels();
+
+  renderLabels();
+  resetPaginationAndRender();
+  statusPill.textContent = `Etichetta #${label.name} eliminata`;
 }
 
 async function encryptExistingNotesForLabel(label) {
@@ -1092,6 +1192,23 @@ function renderTrash() {
 }
 
 async function moveNoteToTrash(note) {
+  if (note.encrypted) {
+    if (!sessionPassphrase) {
+      statusPill.textContent = "Per cestinare note cifrate devi prima aprire la sessione Password";
+      return;
+    }
+    if (!decryptedNoteTextIndex.has(note.id)) {
+      try {
+        const plain = await decryptText(note, sessionPassphrase);
+        decryptedNoteTextIndex.set(note.id, plain);
+        decryptedSearchIndex.set(note.id, plain.toLowerCase());
+      } catch {
+        statusPill.textContent = "Passphrase sessione non valida per questa nota cifrata";
+        return;
+      }
+    }
+  }
+
   const updatedNote = {
     ...note,
     pinned: false,
@@ -1328,7 +1445,6 @@ function enterEditMode(item, note) {
 
     notes = notes.map((entry) => (entry.id === note.id ? updatedNote : entry));
     await idbPut(IDB.stores.notes, updatedNote);
-    triggerN8n("note.updated", updatedNote, text);
 
     if (updatedNote.encrypted) {
       if (sessionPassphrase) {

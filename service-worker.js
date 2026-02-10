@@ -1,4 +1,4 @@
-const CACHE_NAME = "appunti-pwa-v20";
+const CACHE_NAME = "appunti-pwa-v21";
 const APP_SHELL = [
   "./",
   "./index.html",

@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v8</button>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Apri menu">Menu v9</button>
 
     <aside id="side-menu" class="side-menu" aria-hidden="true">
       <div class="menu-head">
@@ -59,12 +59,17 @@
         <h3>Automazioni n8n</h3>
         <label class="hint">
           <input id="n8n-enabled" type="checkbox" />
-          Attiva invio note a webhook n8n
+          Abilita integrazione n8n
+        </label>
+        <label class="hint">
+          <input id="n8n-encrypt-json" type="checkbox" />
+          Cifra il JSON prima dell'invio
         </label>
         <input id="n8n-webhook-url" class="input top-space" type="url" placeholder="https://tuo-n8n/webhook/..." autocomplete="off" />
         <div class="row wrap gap top-space">
           <button id="save-n8n-btn" class="btn ghost" type="button">Salva webhook</button>
           <button id="test-n8n-btn" class="btn ghost" type="button">Test webhook</button>
+          <button id="send-json-n8n-btn" class="btn primary" type="button">Invia JSON</button>
         </div>
         <p id="n8n-meta" class="hint">Webhook n8n non configurato.</p>
       </section>
