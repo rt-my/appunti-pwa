@@ -1602,9 +1602,15 @@ async function importBackupFromFile(event) {
   try {
     const text = await file.text();
     const parsed = JSON.parse(text);
-    mergeBackup(parsed);
+    const resolved = await resolveImportedBackup(parsed);
+    mergeBackup(resolved.backup);
     await rewriteCollections();
-    if (sessionPassphrase) {
+    if (resolved.importPassphrase) {
+      const refreshed = await applySessionPassphrase(resolved.importPassphrase);
+      if (!refreshed.ok) {
+        clearSessionPassphrase();
+      }
+    } else if (sessionPassphrase) {
       const refresh = await applySessionPassphrase(sessionPassphrase);
       if (!refresh.ok) {
         clearSessionPassphrase();
@@ -1612,12 +1618,55 @@ async function importBackupFromFile(event) {
     }
     renderLabels();
     resetPaginationAndRender();
-    statusPill.textContent = "Backup importato correttamente";
+    statusPill.textContent = resolved.source === "n8n-encrypted"
+      ? "Backup n8n cifrato importato e decifrato"
+      : "Backup importato correttamente";
   } catch {
     statusPill.textContent = "Errore: file backup non valido";
   } finally {
     importBackupFile.value = "";
   }
+}
+
+async function resolveImportedBackup(parsed) {
+  // Backup app standard
+  if (parsed && Array.isArray(parsed.notes)) {
+    return { backup: parsed, source: "backup" };
+  }
+
+  // Payload n8n non cifrato
+  if (parsed && parsed.event === "backup.export" && parsed.encrypted === false && parsed.data && Array.isArray(parsed.data.notes)) {
+    return { backup: parsed.data, source: "n8n-plain" };
+  }
+
+  // Payload n8n cifrato (cipherText/iv/salt)
+  if (
+    parsed &&
+    parsed.event === "backup.export" &&
+    parsed.encrypted === true &&
+    typeof parsed.cipherText === "string" &&
+    typeof parsed.iv === "string" &&
+    typeof parsed.salt === "string"
+  ) {
+    const passphrase = window.prompt("Passphrase per decifrare il JSON n8n:");
+    if (!passphrase) {
+      throw new Error("Missing passphrase");
+    }
+
+    const decryptedJson = await decryptText(parsed, passphrase);
+    const decryptedPayload = JSON.parse(decryptedJson);
+    if (!decryptedPayload || !Array.isArray(decryptedPayload.notes)) {
+      throw new Error("Invalid decrypted payload");
+    }
+
+    return {
+      backup: decryptedPayload,
+      source: "n8n-encrypted",
+      importPassphrase: passphrase,
+    };
+  }
+
+  throw new Error("Unsupported backup format");
 }
 
 function mergeBackup(data) {
