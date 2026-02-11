@@ -14,6 +14,7 @@ Funzioni:
 - paginazione: primi 100 risultati + "Carica altri 100"
 - backup/import JSON
 - invio backup verso webhook n8n (chiaro o cifrato)
+- opzione keep-awake durante dettatura (quando supportato da browser/HTTPS)
 - PWA installabile con uso offline
 - archivio principale su IndexedDB (piu adatto a molti dati)
 - migrazione automatica da localStorage alla prima apertura
