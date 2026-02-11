@@ -21,8 +21,6 @@ const PAGE_SIZE = 100;
 const RENDER_BATCH_SIZE = 40;
 const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DICTATION_DRAFT_AUTOSAVE_MS = 25 * 1000;
-const DICTATION_DRAFT_SESSION_KEY = "notes_dictation_draft";
-const DICTATION_RESTART_DELAY_MS = 350;
 
 const statusPill = document.getElementById("status-pill");
 const backupMeta = document.getElementById("backup-meta");
@@ -109,10 +107,8 @@ let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
 let dictationLastFinalRaw = "";
 let dictationPendingFinalRaw = "";
-let dictationLatestInterimRaw = "";
 let dictationDraftBuffer = "";
 let dictationDraftTimer = null;
-let dictationInterruptedByScreen = false;
 const dictationDebugEntries = [];
 let dictationRestartAttempt = 0;
 let dictationRestartFailures = 0;
@@ -200,7 +196,6 @@ async function initApp() {
     renderN8nConfig();
     initDictationSupport();
     renderWakeLockState();
-    restoreDictationDraftSnapshot();
     renderBackupMeta();
     renderEncryptedSearchMeta();
     updateEncryptionVisibilityControl();
@@ -281,7 +276,6 @@ function bindEvents() {
   });
   on(emptyTrashBtn, "click", emptyTrash);
   setupSessionInactivityWatcher();
-  setupDictationVisibilityWatcher();
 }
 
 function setupSessionInactivityWatcher() {
@@ -302,6 +296,16 @@ function setupSessionInactivityWatcher() {
   });
 
   window.addEventListener("focus", touchSessionActivity);
+
+  document.addEventListener("visibilitychange", () => {
+    syncWakeLock(document.visibilityState === "visible" ? "visible" : "hidden").catch(() => {
+    });
+  });
+
+  window.addEventListener("pagehide", () => {
+    syncWakeLock("pagehide").catch(() => {
+    });
+  });
 }
 
 function canUseWakeLock() {
@@ -415,38 +419,6 @@ async function handleKeepAwakeDictationToggle() {
   }
   await syncWakeLock("setting-change");
   renderWakeLockState();
-}
-
-function setupDictationVisibilityWatcher() {
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") {
-      syncWakeLock("hidden").catch(() => {
-      });
-      if (dictationActive || dictationRequested || dictationDraftBuffer || dictationPendingFinalRaw) {
-        dictationInterruptedByScreen = true;
-        saveDictationDraftSnapshot("screen-hidden");
-        stopDictationAndCommit("screen-hidden", 1000).catch(() => {
-        });
-        pushDictationDebug("screen-hidden", "dettatura sospesa");
-      }
-      return;
-    }
-
-    syncWakeLock("visible").catch(() => {
-    });
-    if (dictationInterruptedByScreen) {
-      dictationInterruptedByScreen = false;
-      pushDictationDebug("screen-visible", "ripresa manuale richiesta");
-      renderDictationState("Schermo riattivato: premi Detta per continuare.");
-    }
-  });
-
-  window.addEventListener("pagehide", () => {
-    syncWakeLock("pagehide").catch(() => {
-    });
-    saveDictationDraftSnapshot("pagehide");
-    clearDictationDraftTimer();
-  });
 }
 
 function touchSessionActivity() {
@@ -741,43 +713,6 @@ function getDictationComposedText() {
   return appendTextWithSpacing(noteInput.value || "", dictationDraftBuffer || "");
 }
 
-function saveDictationDraftSnapshot(reason) {
-  const composed = getDictationComposedText().trim();
-  if (!composed) {
-    return false;
-  }
-
-  try {
-    sessionStorage.setItem(DICTATION_DRAFT_SESSION_KEY, composed);
-    pushDictationDebug("draft-save", `${reason} chars=${composed.length}`);
-    return true;
-  } catch {
-    pushDictationDebug("draft-save", `${reason} storage-failed`);
-    return false;
-  }
-}
-
-function clearDictationDraftSnapshot() {
-  try {
-    sessionStorage.removeItem(DICTATION_DRAFT_SESSION_KEY);
-  } catch {
-  }
-}
-
-function restoreDictationDraftSnapshot() {
-  try {
-    const saved = (sessionStorage.getItem(DICTATION_DRAFT_SESSION_KEY) || "").trim();
-    if (!saved) {
-      return;
-    }
-    if (!noteInput.value.trim()) {
-      noteInput.value = saved;
-      pushDictationDebug("draft-restore", `chars=${saved.length}`);
-    }
-  } catch {
-  }
-}
-
 function clearDictationDraftTimer() {
   if (dictationDraftTimer) {
     clearTimeout(dictationDraftTimer);
@@ -788,12 +723,10 @@ function clearDictationDraftTimer() {
 function flushDictationDraftToInput(reason) {
   const draft = (dictationDraftBuffer || "").trim();
   if (!draft) {
-    clearDictationDraftSnapshot();
     return false;
   }
   appendDictatedText(draft);
   dictationDraftBuffer = "";
-  clearDictationDraftSnapshot();
   pushDictationDebug("draft-flush", `${reason} chars=${draft.length}`);
   return true;
 }
@@ -804,7 +737,10 @@ function armDictationDraftTimer() {
     return;
   }
   dictationDraftTimer = setTimeout(() => {
-    saveDictationDraftSnapshot("autosave");
+    const flushed = flushDictationDraftToInput("autosave");
+    if (flushed) {
+      renderDictationState("Bozza dettatura salvata automaticamente.");
+    }
     if (dictationActive || dictationRequested) {
       armDictationDraftTimer();
     }
@@ -953,7 +889,6 @@ function initDictationSupport() {
   dictationRecognition.onstart = () => {
     dictationStopping = false;
     dictationActive = true;
-    dictationLatestInterimRaw = "";
     armDictationDraftTimer();
     syncWakeLock("dictation-start").catch(() => {
     });
@@ -979,30 +914,24 @@ function initDictationSupport() {
     }
 
     if (finalCandidates.length > 0) {
-      // Su Android la Web Speech API rimanda spesso più finali "a gradini".
-      // Prendiamo il più recente (idx più alto) per evitare stalli su frasi vecchie.
-      const best = finalCandidates[finalCandidates.length - 1];
+      let best = finalCandidates[0];
+      let bestTokenCount = countDictationTokens(best.piece);
+      for (let i = 1; i < finalCandidates.length; i += 1) {
+        const candidate = finalCandidates[i];
+        const tokenCount = countDictationTokens(candidate.piece);
+        if (tokenCount > bestTokenCount || (tokenCount === bestTokenCount && candidate.piece.length > best.piece.length)) {
+          best = candidate;
+          bestTokenCount = tokenCount;
+        }
+      }
 
       const pendingNorm = normalizeDictationText(dictationPendingFinalRaw);
       const bestNorm = normalizeDictationText(best.piece);
-      const pendingTokenCount = countDictationTokens(dictationPendingFinalRaw);
-      const bestTokenCountNow = countDictationTokens(best.piece);
-      const isLikelyDowngrade =
-        pendingNorm &&
-        bestNorm &&
-        bestTokenCountNow + 1 < pendingTokenCount &&
-        pendingNorm.includes(bestNorm);
-
-      if (!bestNorm) {
-        pushDictationDebug("final-skip", `idx=${best.idx} empty-normalized`);
-      } else if (bestNorm === pendingNorm) {
-        pushDictationDebug("final-skip", `idx=${best.idx} same-pending`);
-      } else if (isLikelyDowngrade) {
-        pushDictationDebug("final-skip", `idx=${best.idx} downgrade ${bestTokenCountNow}<${pendingTokenCount}`);
-      } else {
+      if (bestNorm && bestNorm !== pendingNorm) {
         dictationPendingFinalRaw = best.piece;
-        dictationLatestInterimRaw = "";
         pushDictationDebug("final-candidate", `idx=${best.idx} text="${best.piece.slice(0, 80)}"`);
+      } else {
+        pushDictationDebug("final-skip", `idx=${best.idx} same-pending`);
       }
       renderDictationState();
       return;
@@ -1013,7 +942,6 @@ function initDictationSupport() {
     }
     const interimText = interimChunks.join(" ").trim();
     if (interimText) {
-      dictationLatestInterimRaw = interimText;
       pushDictationDebug("interim", interimText.slice(0, 80));
       renderDictationState(`Dettatura: ${interimText.trim()}`);
       return;
@@ -1032,8 +960,9 @@ function initDictationSupport() {
       dictationStopping = false;
       dictationLastFinalRaw = "";
       dictationPendingFinalRaw = "";
-      dictationLatestInterimRaw = "";
       dictationDraftBuffer = "";
+      syncWakeLock("dictation-error").catch(() => {
+      });
       renderDictationState("Microfono non autorizzato.");
       return;
     }
@@ -1073,20 +1002,6 @@ function initDictationSupport() {
       }
       dictationPendingFinalRaw = "";
     }
-    if (!dictationPendingFinalRaw && dictationLatestInterimRaw) {
-      const fallbackIncrement = deriveIncrementFromFinal(dictationLastFinalRaw, dictationLatestInterimRaw);
-      if (fallbackIncrement) {
-        const fallbackOutcome = appendDictatedTextUnique(fallbackIncrement);
-        pushDictationDebug(
-          "interim-commit",
-          `inc="${fallbackIncrement.slice(0, 80)}" ${fallbackOutcome.ok ? "ok" : `skip:${fallbackOutcome.reason}`}`
-        );
-        if (fallbackOutcome.ok) {
-          dictationLastFinalRaw = dictationLatestInterimRaw;
-        }
-      }
-      dictationLatestInterimRaw = "";
-    }
 
     if (dictationRequested && !dictationStopping) {
       dictationRestartAttempt += 1;
@@ -1098,12 +1013,11 @@ function initDictationSupport() {
         }
         try {
           dictationRecognition.start();
-          dictationRestartFailures = 0;
           pushDictationDebug("restart", "ok");
         } catch {
           dictationRestartFailures += 1;
           pushDictationDebug("restart", `fail #${dictationRestartFailures}`);
-          if (dictationRestartFailures >= 6) {
+          if (dictationRestartFailures >= 3) {
             flushDictationDraftToInput("restart-fail");
             clearDictationDraftTimer();
             dictationRequested = false;
@@ -1114,7 +1028,7 @@ function initDictationSupport() {
           }
           renderDictationState("Dettatura in corso...");
         }
-      }, DICTATION_RESTART_DELAY_MS);
+      }, 350);
       return;
     }
 
@@ -1124,7 +1038,6 @@ function initDictationSupport() {
     dictationStopping = false;
     dictationLastFinalRaw = "";
     dictationPendingFinalRaw = "";
-    dictationLatestInterimRaw = "";
     dictationDraftBuffer = "";
     syncWakeLock("dictation-end").catch(() => {
     });
@@ -1158,7 +1071,6 @@ function toggleDictation() {
     dictationStopping = false;
     dictationLastFinalRaw = "";
     dictationPendingFinalRaw = "";
-    dictationLatestInterimRaw = "";
     dictationDraftBuffer = "";
     clearDictationDraftTimer();
     lastDictationFinalNorm = "";
@@ -1412,7 +1324,6 @@ async function submitNewNote() {
   await idbPut(IDB.stores.notes, note);
 
   noteInput.value = "";
-  clearDictationDraftSnapshot();
   selectedNewLabelIds.clear();
   renderLabels();
   resetPaginationAndRender();
