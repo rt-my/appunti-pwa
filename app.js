@@ -102,6 +102,7 @@ let dictationStopping = false;
 let lastDictationFinalNorm = "";
 let lastDictationFinalAt = 0;
 let dictationLastFinalRaw = "";
+let dictationPendingFinalRaw = "";
 const dictationDebugEntries = [];
 let dictationRestartAttempt = 0;
 let dictationRestartFailures = 0;
@@ -576,6 +577,10 @@ function splitDictationTokens(rawText) {
   return tokens;
 }
 
+function countDictationTokens(rawText) {
+  return splitDictationTokens(rawText).length;
+}
+
 function deriveIncrementFromFinal(previousRaw, currentRaw) {
   const prevTokens = splitDictationTokens(previousRaw);
   const currTokens = splitDictationTokens(currentRaw);
@@ -683,13 +688,12 @@ function initDictationSupport() {
     dictationActive = true;
     dictationRestartFailures = 0;
     dictationRestartAttempt = 0;
-    dictationLastFinalRaw = "";
     pushDictationDebug("start", "microfono attivo");
     renderDictationState();
   };
 
   dictationRecognition.onresult = (event) => {
-    let handledFinal = 0;
+    const finalCandidates = [];
     const interimChunks = [];
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
@@ -699,37 +703,32 @@ function initDictationSupport() {
       }
 
       if (result.isFinal) {
-        handledFinal += 1;
-        const normalized = normalizeDictationText(piece);
-        const lastNormalized = normalizeDictationText(dictationLastFinalRaw);
-
-        if (!normalized) {
-          pushDictationDebug("final-skip", `idx=${i} empty-normalized`);
-          continue;
-        }
-        if (normalized === lastNormalized) {
-          pushDictationDebug("final-skip", `idx=${i} same-final`);
-          continue;
-        }
-
-        let incremental = deriveIncrementFromFinal(dictationLastFinalRaw, piece);
-        if (!incremental && normalized !== lastNormalized) {
-          incremental = piece;
-        }
-
-        const outcome = appendDictatedTextUnique(incremental);
-        pushDictationDebug(
-          "final",
-          `idx=${i} inc="${(incremental || "").slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${piece.slice(0, 80)}"`
-        );
-
-        dictationLastFinalRaw = piece;
+        finalCandidates.push({ idx: i, piece });
       } else {
         interimChunks.push(piece);
       }
     }
 
-    if (handledFinal > 0) {
+    if (finalCandidates.length > 0) {
+      let best = finalCandidates[0];
+      let bestTokenCount = countDictationTokens(best.piece);
+      for (let i = 1; i < finalCandidates.length; i += 1) {
+        const candidate = finalCandidates[i];
+        const tokenCount = countDictationTokens(candidate.piece);
+        if (tokenCount > bestTokenCount || (tokenCount === bestTokenCount && candidate.piece.length > best.piece.length)) {
+          best = candidate;
+          bestTokenCount = tokenCount;
+        }
+      }
+
+      const pendingNorm = normalizeDictationText(dictationPendingFinalRaw);
+      const bestNorm = normalizeDictationText(best.piece);
+      if (bestNorm && bestNorm !== pendingNorm) {
+        dictationPendingFinalRaw = best.piece;
+        pushDictationDebug("final-candidate", `idx=${best.idx} text="${best.piece.slice(0, 80)}"`);
+      } else {
+        pushDictationDebug("final-skip", `idx=${best.idx} same-pending`);
+      }
       renderDictationState();
       return;
     }
@@ -754,6 +753,7 @@ function initDictationSupport() {
       dictationRequested = false;
       dictationStopping = false;
       dictationLastFinalRaw = "";
+      dictationPendingFinalRaw = "";
       renderDictationState("Microfono non autorizzato.");
       return;
     }
@@ -773,7 +773,27 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
-    dictationLastFinalRaw = "";
+
+    if (dictationPendingFinalRaw) {
+      const pendingNormalized = normalizeDictationText(dictationPendingFinalRaw);
+      const committedNormalized = normalizeDictationText(dictationLastFinalRaw);
+      if (pendingNormalized && pendingNormalized !== committedNormalized) {
+        let incremental = deriveIncrementFromFinal(dictationLastFinalRaw, dictationPendingFinalRaw);
+        if (!incremental) {
+          incremental = dictationPendingFinalRaw;
+        }
+        const outcome = appendDictatedTextUnique(incremental);
+        pushDictationDebug(
+          "final-commit",
+          `inc="${(incremental || "").slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${dictationPendingFinalRaw.slice(0, 80)}"`
+        );
+        dictationLastFinalRaw = dictationPendingFinalRaw;
+      } else {
+        pushDictationDebug("final-commit-skip", "same-as-committed");
+      }
+      dictationPendingFinalRaw = "";
+    }
+
     if (dictationRequested && !dictationStopping) {
       dictationRestartAttempt += 1;
       pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt}`);
@@ -801,6 +821,8 @@ function initDictationSupport() {
     }
     dictationRequested = false;
     dictationStopping = false;
+    dictationLastFinalRaw = "";
+    dictationPendingFinalRaw = "";
     pushDictationDebug("end", "sessione chiusa");
     renderDictationState();
   };
@@ -829,6 +851,7 @@ function toggleDictation() {
     dictationRequested = true;
     dictationStopping = false;
     dictationLastFinalRaw = "";
+    dictationPendingFinalRaw = "";
     lastDictationFinalNorm = "";
     lastDictationFinalAt = 0;
     dictationRestartAttempt = 0;
