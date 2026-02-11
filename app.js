@@ -22,12 +22,8 @@ const RENDER_BATCH_SIZE = 40;
 const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const DICTATION_DRAFT_AUTOSAVE_MS = 25 * 1000;
 const DICTATION_DRAFT_SESSION_KEY = "notes_dictation_draft";
-const DICTATION_RESTART_DELAY_FAST_MS = 500;
-const DICTATION_RESTART_DELAY_IDLE_BASE_MS = 1200;
-const DICTATION_RESTART_DELAY_IDLE_STEP_MS = 400;
-const DICTATION_RESTART_DELAY_IDLE_MAX_MS = 3000;
-const DICTATION_MAX_CONSECUTIVE_RESTARTS = 10;
-const DICTATION_RESTART_RESET_WINDOW_MS = 30000;
+const DICTATION_SEGMENT_MS = 3000;
+const DICTATION_SEGMENT_PAUSE_MS = 800;
 
 const statusPill = document.getElementById("status-pill");
 const backupMeta = document.getElementById("backup-meta");
@@ -121,11 +117,7 @@ let dictationInterruptedByScreen = false;
 const dictationDebugEntries = [];
 let dictationRestartAttempt = 0;
 let dictationRestartFailures = 0;
-let dictationSegmentHadSpeech = false;
-let dictationSilentSegmentsInRow = 0;
-let dictationConsecutiveRestarts = 0;
-let dictationLastRestartTime = 0;
-let dictationRestartCooldown = false;
+let dictationSegmentTimer = null;
 let keepAwakeDuringDictation = true;
 let wakeLockSentinel = null;
 let wakeLockRequestInFlight = false;
@@ -703,7 +695,7 @@ function renderDictationState(message = "") {
     if (message) {
       dictationMeta.textContent = message;
     } else {
-      dictationMeta.textContent = engaged ? "Dettatura in corso (riavvio automatico)..." : "Dettatura non attiva.";
+      dictationMeta.textContent = engaged ? "Dettatura in corso (segmenti da 3s)..." : "Dettatura non attiva.";
     }
   }
   renderWakeLockState();
@@ -942,12 +934,28 @@ function appendDictatedTextUnique(chunk) {
   return { ok: true, reason: "buffered", text: rawChunk };
 }
 
-function computeDictationRestartDelay() {
-  if (dictationSegmentHadSpeech) {
-    return DICTATION_RESTART_DELAY_FAST_MS;
+function clearDictationSegmentTimer() {
+  if (dictationSegmentTimer) {
+    clearTimeout(dictationSegmentTimer);
+    dictationSegmentTimer = null;
   }
-  const extra = Math.max(0, dictationSilentSegmentsInRow - 1) * DICTATION_RESTART_DELAY_IDLE_STEP_MS;
-  return Math.min(DICTATION_RESTART_DELAY_IDLE_MAX_MS, DICTATION_RESTART_DELAY_IDLE_BASE_MS + extra);
+}
+
+function armDictationSegmentTimer() {
+  clearDictationSegmentTimer();
+  if (!dictationRequested || dictationStopping) {
+    return;
+  }
+  dictationSegmentTimer = setTimeout(() => {
+    if (!dictationRequested || dictationStopping || !dictationActive || !dictationRecognition) {
+      return;
+    }
+    pushDictationDebug("segment", `stop@${DICTATION_SEGMENT_MS}ms`);
+    try {
+      dictationRecognition.stop();
+    } catch {
+    }
+  }, DICTATION_SEGMENT_MS);
 }
 
 function initDictationSupport() {
@@ -965,15 +973,15 @@ function initDictationSupport() {
 
   dictationRecognition = new SR();
   dictationRecognition.lang = "it-IT";
-  dictationRecognition.continuous = true;
+  dictationRecognition.continuous = false;
   dictationRecognition.interimResults = true;
 
   dictationRecognition.onstart = () => {
     dictationStopping = false;
     dictationActive = true;
     dictationLatestInterimRaw = "";
-    dictationSegmentHadSpeech = false;
     armDictationDraftTimer();
+    armDictationSegmentTimer();
     syncWakeLock("dictation-start").catch(() => {
     });
     pushDictationDebug("start", "microfono attivo");
@@ -983,23 +991,18 @@ function initDictationSupport() {
   dictationRecognition.onresult = (event) => {
     const finalCandidates = [];
     const interimChunks = [];
-    let hasAnyTranscript = false;
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       const piece = result?.[0]?.transcript?.trim() || "";
       if (!piece) {
         continue;
       }
-      hasAnyTranscript = true;
 
       if (result.isFinal) {
         finalCandidates.push({ idx: i, piece });
       } else {
         interimChunks.push(piece);
       }
-    }
-    if (hasAnyTranscript) {
-      dictationSegmentHadSpeech = true;
     }
 
     if (finalCandidates.length > 0) {
@@ -1058,8 +1061,7 @@ function initDictationSupport() {
       dictationPendingFinalRaw = "";
       dictationLatestInterimRaw = "";
       dictationDraftBuffer = "";
-      dictationSegmentHadSpeech = false;
-      dictationSilentSegmentsInRow = 0;
+      clearDictationSegmentTimer();
       renderDictationState("Microfono non autorizzato.");
       return;
     }
@@ -1079,6 +1081,7 @@ function initDictationSupport() {
 
   dictationRecognition.onend = () => {
     dictationActive = false;
+    clearDictationSegmentTimer();
 
     if (dictationPendingFinalRaw) {
       const pendingNormalized = normalizeDictationText(dictationPendingFinalRaw);
@@ -1115,47 +1118,8 @@ function initDictationSupport() {
     }
 
     if (dictationRequested && !dictationStopping) {
-      // Controlla riavvii consecutivi in una finestra temporale
-      const now = Date.now();
-      if (now - dictationLastRestartTime > DICTATION_RESTART_RESET_WINDOW_MS) {
-        // Resetta contatore se è passato abbastanza tempo
-        dictationConsecutiveRestarts = 0;
-        dictationRestartCooldown = false;
-      }
-      
-      dictationConsecutiveRestarts += 1;
-      dictationLastRestartTime = now;
-      
-      // Se troppi riavvii consecutivi, entra in cooldown
-      if (dictationConsecutiveRestarts > DICTATION_MAX_CONSECUTIVE_RESTARTS && !dictationRestartCooldown) {
-        dictationRestartCooldown = true;
-        pushDictationDebug("restart-limit", `troppi riavvii (${dictationConsecutiveRestarts}), pausa 5s`);
-        flushDictationDraftToInput("restart-limit");
-        clearDictationDraftTimer();
-        dictationRequested = false;
-        dictationStopping = false;
-        dictationDraftBuffer = "";
-        renderDictationState("Troppi riavvii. Attendi 5 secondi e riprova.");
-        
-        // Reset automatico dopo cooldown
-        setTimeout(() => {
-          dictationConsecutiveRestarts = 0;
-          dictationRestartCooldown = false;
-          renderDictationState();
-        }, 5000);
-        return;
-      }
-      
-      if (dictationSegmentHadSpeech) {
-        dictationSilentSegmentsInRow = 0;
-      } else {
-        dictationSilentSegmentsInRow += 1;
-      }
-      const restartDelay = computeDictationRestartDelay();
-      const segmentMode = dictationSegmentHadSpeech ? "speech" : `silent#${dictationSilentSegmentsInRow}`;
-      dictationSegmentHadSpeech = false;
       dictationRestartAttempt += 1;
-      pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt} consecutivi=${dictationConsecutiveRestarts} mode=${segmentMode} delay=${restartDelay}ms`);
+      pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt} delay=${DICTATION_SEGMENT_PAUSE_MS}ms`);
       renderDictationState("Dettatura in corso...");
       setTimeout(() => {
         if (!dictationRequested || dictationActive) {
@@ -1174,13 +1138,12 @@ function initDictationSupport() {
             dictationRequested = false;
             dictationStopping = false;
             dictationDraftBuffer = "";
-            dictationConsecutiveRestarts = 0;
             renderDictationState("Riavvio dettatura fallito. Premi Detta.");
             return;
           }
           renderDictationState("Dettatura in corso...");
         }
-      }, restartDelay);
+      }, DICTATION_SEGMENT_PAUSE_MS);
       return;
     }
 
@@ -1192,11 +1155,7 @@ function initDictationSupport() {
     dictationPendingFinalRaw = "";
     dictationLatestInterimRaw = "";
     dictationDraftBuffer = "";
-    dictationSegmentHadSpeech = false;
-    dictationSilentSegmentsInRow = 0;
-    dictationConsecutiveRestarts = 0;
-    dictationLastRestartTime = 0;
-    dictationRestartCooldown = false;
+    clearDictationSegmentTimer();
     syncWakeLock("dictation-end").catch(() => {
     });
     pushDictationDebug("end", "sessione chiusa");
@@ -1236,11 +1195,7 @@ function toggleDictation() {
     lastDictationFinalAt = 0;
     dictationRestartAttempt = 0;
     dictationRestartFailures = 0;
-    dictationSegmentHadSpeech = false;
-    dictationSilentSegmentsInRow = 0;
-    dictationConsecutiveRestarts = 0;
-    dictationLastRestartTime = 0;
-    dictationRestartCooldown = false;
+    clearDictationSegmentTimer();
     pushDictationDebug("start-click", "richiesta start");
     dictationRecognition.start();
   } catch {
