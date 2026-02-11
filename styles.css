@@ -32,12 +32,12 @@ h2{margin:0 0 10px;font-size:1rem}
 .loading-item{padding:10px;text-align:center;color:var(--muted);font-size:.9rem}
 .backup-guide{margin-top:10px;padding:10px;border:1px dashed var(--line);border-radius:10px;background:#f8fbfc}
 .warning-text{color:#9a5b0d}
-.label-row{width:100%;display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfdfd}
-.label-name{font-size:.9rem}
+.label-row{width:100%;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfdfd}
+.label-name{font-size:.9rem;flex:1 1 170px;min-width:0;word-break:break-word}
 .label-row.protected{border-color:#d9b26a;background:#fff8e8}
+.label-actions{flex:1 1 220px;justify-content:flex-end;flex-wrap:wrap;gap:6px}
+.label-action-btn{padding:5px 8px;font-size:.76rem;line-height:1.15;border-radius:8px;white-space:nowrap}
+@media (max-width:560px){.label-actions{justify-content:flex-start;flex-basis:100%}}
 .protected-pill{font-size:.75rem;padding:3px 7px;border-radius:999px;background:#ffe9bf;color:#704600}
 .trash-row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#fbfdfd;margin-bottom:8px}
-.dictation-debug{border:1px dashed var(--line);border-radius:10px;padding:8px;background:#f8fbfc}
-.dictation-debug summary{cursor:pointer;color:var(--muted);font-size:.85rem}
-.dictation-debug-log{margin:8px 0 0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:.78rem;line-height:1.35;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px}
 

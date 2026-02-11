@@ -4,7 +4,6 @@
   lastBackupAt: "notes_last_backup_at",
   lastIncrementalExportAt: "notes_last_incremental_export_at",
   n8nConfig: "notes_n8n_config",
-  keepAwakeDictation: "notes_keep_awake_dictation",
 };
 
 const IDB = {
@@ -20,7 +19,6 @@ const IDB = {
 const PAGE_SIZE = 100;
 const RENDER_BATCH_SIZE = 40;
 const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-const DICTATION_DRAFT_AUTOSAVE_MS = 25 * 1000;
 
 const statusPill = document.getElementById("status-pill");
 const backupMeta = document.getElementById("backup-meta");
@@ -58,11 +56,6 @@ const exportFilteredTxtBtn = document.getElementById("export-filtered-txt-btn");
 
 const noteInput = document.getElementById("note-input");
 const addNoteBtn = document.getElementById("add-note-btn");
-const dictateBtn = document.getElementById("dictate-btn");
-const dictationMeta = document.getElementById("dictation-meta");
-const keepAwakeDuringDictationInput = document.getElementById("keep-awake-dictation");
-const wakeLockMeta = document.getElementById("wake-lock-meta");
-const dictationDebugLog = document.getElementById("dictation-debug-log");
 const labelInput = document.getElementById("label-input");
 const addLabelBtn = document.getElementById("add-label-btn");
 const sessionPassphraseBtn = document.getElementById("session-passphrase-btn");
@@ -99,22 +92,6 @@ let n8nEnabled = false;
 let n8nWebhookUrl = "";
 let n8nEncryptJson = false;
 let n8nOnlyFiltered = false;
-let dictationRecognition = null;
-let dictationActive = false;
-let dictationRequested = false;
-let dictationStopping = false;
-let lastDictationFinalNorm = "";
-let lastDictationFinalAt = 0;
-let dictationLastFinalRaw = "";
-let dictationPendingFinalRaw = "";
-let dictationDraftBuffer = "";
-let dictationDraftTimer = null;
-const dictationDebugEntries = [];
-let dictationRestartAttempt = 0;
-let dictationRestartFailures = 0;
-let keepAwakeDuringDictation = true;
-let wakeLockSentinel = null;
-let wakeLockRequestInFlight = false;
 const decryptedSearchIndex = new Map();
 const decryptedNoteTextIndex = new Map();
 
@@ -184,18 +161,11 @@ async function initApp() {
       n8nOnlyFiltered = Boolean(n8nConfigMeta.value.onlyFiltered);
     }
 
-    const keepAwakeMeta = await idbGet(IDB.stores.meta, KEYS.keepAwakeDictation);
-    if (typeof keepAwakeMeta?.value === "boolean") {
-      keepAwakeDuringDictation = keepAwakeMeta.value;
-    }
-
     labels.sort((a, b) => a.name.localeCompare(b.name, "it"));
     notes.sort(compareNotes);
 
     bindEvents();
     renderN8nConfig();
-    initDictationSupport();
-    renderWakeLockState();
     renderBackupMeta();
     renderEncryptedSearchMeta();
     updateEncryptionVisibilityControl();
@@ -216,7 +186,6 @@ function bindEvents() {
   on(menuOverlay, "click", closeMenu);
 
   on(addNoteBtn, "click", submitNewNote);
-  on(dictateBtn, "click", toggleDictation);
   on(noteInput, "keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -269,7 +238,6 @@ function bindEvents() {
   on(saveN8nBtn, "click", saveN8nConfig);
   on(testN8nBtn, "click", testN8nWebhook);
   on(sendJsonN8nBtn, "click", sendJsonToN8n);
-  on(keepAwakeDuringDictationInput, "change", handleKeepAwakeDictationToggle);
   on(toggleTrashBtn, "click", () => {
     trashOpen = !trashOpen;
     renderTrash();
@@ -297,128 +265,6 @@ function setupSessionInactivityWatcher() {
 
   window.addEventListener("focus", touchSessionActivity);
 
-  document.addEventListener("visibilitychange", () => {
-    syncWakeLock(document.visibilityState === "visible" ? "visible" : "hidden").catch(() => {
-    });
-  });
-
-  window.addEventListener("pagehide", () => {
-    syncWakeLock("pagehide").catch(() => {
-    });
-  });
-}
-
-function canUseWakeLock() {
-  return Boolean(globalThis.isSecureContext && navigator?.wakeLock?.request);
-}
-
-function shouldHoldWakeLock() {
-  return keepAwakeDuringDictation && (dictationActive || dictationRequested);
-}
-
-function renderWakeLockState(message = "") {
-  if (keepAwakeDuringDictationInput) {
-    keepAwakeDuringDictationInput.checked = keepAwakeDuringDictation;
-    keepAwakeDuringDictationInput.disabled = !canUseWakeLock();
-  }
-  if (!wakeLockMeta) {
-    return;
-  }
-  if (message) {
-    wakeLockMeta.textContent = message;
-    return;
-  }
-  if (!canUseWakeLock()) {
-    wakeLockMeta.textContent = "Keep-awake non supportato qui (serve HTTPS o localhost).";
-    return;
-  }
-  if (!keepAwakeDuringDictation) {
-    wakeLockMeta.textContent = "Keep-awake disattivato.";
-    return;
-  }
-  if (wakeLockSentinel) {
-    wakeLockMeta.textContent = "Keep-awake attivo durante la dettatura.";
-    return;
-  }
-  if (dictationActive || dictationRequested) {
-    wakeLockMeta.textContent = "Keep-awake: tentativo in corso...";
-    return;
-  }
-  wakeLockMeta.textContent = "Keep-awake pronto.";
-}
-
-async function requestWakeLock(reason) {
-  if (!canUseWakeLock()) {
-    return false;
-  }
-  if (wakeLockSentinel || wakeLockRequestInFlight) {
-    return Boolean(wakeLockSentinel);
-  }
-  if (document.visibilityState !== "visible") {
-    return false;
-  }
-
-  wakeLockRequestInFlight = true;
-  try {
-    const sentinel = await navigator.wakeLock.request("screen");
-    wakeLockSentinel = sentinel;
-    sentinel.addEventListener("release", () => {
-      if (wakeLockSentinel === sentinel) {
-        wakeLockSentinel = null;
-      }
-      pushDictationDebug("wake-lock", "released");
-      renderWakeLockState();
-    });
-    pushDictationDebug("wake-lock", `acquired ${reason}`);
-    renderWakeLockState();
-    return true;
-  } catch {
-    pushDictationDebug("wake-lock", `failed ${reason}`);
-    renderWakeLockState();
-    return false;
-  } finally {
-    wakeLockRequestInFlight = false;
-  }
-}
-
-async function releaseWakeLock(reason) {
-  if (!wakeLockSentinel) {
-    return;
-  }
-  try {
-    await wakeLockSentinel.release();
-  } catch {
-  } finally {
-    wakeLockSentinel = null;
-    pushDictationDebug("wake-lock", `released ${reason}`);
-    renderWakeLockState();
-  }
-}
-
-async function syncWakeLock(reason) {
-  if (!canUseWakeLock()) {
-    renderWakeLockState();
-    return;
-  }
-  if (shouldHoldWakeLock()) {
-    await requestWakeLock(reason);
-  } else {
-    await releaseWakeLock(reason);
-  }
-}
-
-async function handleKeepAwakeDictationToggle() {
-  keepAwakeDuringDictation = Boolean(keepAwakeDuringDictationInput?.checked);
-  pushDictationDebug("wake-lock-setting", keepAwakeDuringDictation ? "on" : "off");
-  try {
-    await idbPut(IDB.stores.meta, {
-      key: KEYS.keepAwakeDictation,
-      value: keepAwakeDuringDictation,
-    });
-  } catch {
-  }
-  await syncWakeLock("setting-change");
-  renderWakeLockState();
 }
 
 function touchSessionActivity() {
@@ -654,482 +500,6 @@ async function testN8nWebhook() {
   }
 }
 
-function renderDictationState(message = "") {
-  const engaged = dictationActive || dictationRequested;
-  if (dictateBtn) {
-    dictateBtn.textContent = engaged ? "Stop dettatura" : "Detta";
-    dictateBtn.classList.toggle("primary", engaged);
-    dictateBtn.classList.toggle("ghost", !engaged);
-  }
-  if (dictationMeta) {
-    if (message) {
-      dictationMeta.textContent = message;
-    } else {
-      dictationMeta.textContent = engaged ? "Dettatura in corso..." : "Dettatura non attiva.";
-    }
-  }
-  renderWakeLockState();
-}
-
-function pushDictationDebug(eventName, details = "") {
-  if (!dictationDebugLog) {
-    return;
-  }
-  const stamp = new Date().toLocaleTimeString("it-IT", { hour12: false });
-  const detailText = `${details}`.trim();
-  const line = detailText ? `[${stamp}] ${eventName} | ${detailText}` : `[${stamp}] ${eventName}`;
-  dictationDebugEntries.push(line);
-  if (dictationDebugEntries.length > 80) {
-    dictationDebugEntries.shift();
-  }
-  dictationDebugLog.textContent = dictationDebugEntries.join("\n");
-  dictationDebugLog.scrollTop = dictationDebugLog.scrollHeight;
-}
-
-function appendDictatedText(chunk) {
-  const text = (chunk || "").trim();
-  if (!text) {
-    return;
-  }
-  const current = noteInput.value || "";
-  noteInput.value = current ? `${current}${current.endsWith(" ") || current.endsWith("\n") ? "" : " "}${text}` : text;
-  noteInput.focus();
-}
-
-function appendTextWithSpacing(base, addition) {
-  const source = `${base || ""}`;
-  const extra = `${addition || ""}`.trim();
-  if (!extra) {
-    return source;
-  }
-  if (!source) {
-    return extra;
-  }
-  const spacer = source.endsWith(" ") || source.endsWith("\n") ? "" : " ";
-  return `${source}${spacer}${extra}`;
-}
-
-function getDictationComposedText() {
-  return appendTextWithSpacing(noteInput.value || "", dictationDraftBuffer || "");
-}
-
-function clearDictationDraftTimer() {
-  if (dictationDraftTimer) {
-    clearTimeout(dictationDraftTimer);
-    dictationDraftTimer = null;
-  }
-}
-
-function flushDictationDraftToInput(reason) {
-  const draft = (dictationDraftBuffer || "").trim();
-  if (!draft) {
-    return false;
-  }
-  appendDictatedText(draft);
-  dictationDraftBuffer = "";
-  pushDictationDebug("draft-flush", `${reason} chars=${draft.length}`);
-  return true;
-}
-
-function armDictationDraftTimer() {
-  clearDictationDraftTimer();
-  if (!(dictationActive || dictationRequested)) {
-    return;
-  }
-  dictationDraftTimer = setTimeout(() => {
-    const flushed = flushDictationDraftToInput("autosave");
-    if (flushed) {
-      renderDictationState("Bozza dettatura salvata automaticamente.");
-    }
-    if (dictationActive || dictationRequested) {
-      armDictationDraftTimer();
-    }
-  }, DICTATION_DRAFT_AUTOSAVE_MS);
-}
-
-function appendToDictationDraft(chunk) {
-  const text = (chunk || "").trim();
-  if (!text) {
-    return false;
-  }
-  dictationDraftBuffer = appendTextWithSpacing(dictationDraftBuffer, text);
-  armDictationDraftTimer();
-  return true;
-}
-
-function normalizeDictationText(value) {
-  return (value || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\u00c0-\u024f\s]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function splitDictationTokens(rawText) {
-  const words = (rawText || "").trim().split(/\s+/).filter(Boolean);
-  const tokens = [];
-  for (const raw of words) {
-    const norm = normalizeDictationText(raw);
-    if (!norm) {
-      continue;
-    }
-    tokens.push({ raw, norm });
-  }
-  return tokens;
-}
-
-function countDictationTokens(rawText) {
-  return splitDictationTokens(rawText).length;
-}
-
-function deriveIncrementFromFinal(previousRaw, currentRaw) {
-  const prevTokens = splitDictationTokens(previousRaw);
-  const currTokens = splitDictationTokens(currentRaw);
-
-  if (currTokens.length === 0) {
-    return "";
-  }
-  if (prevTokens.length === 0) {
-    return currTokens.map((t) => t.raw).join(" ").trim();
-  }
-
-  const prevNorm = prevTokens.map((t) => t.norm);
-  const currNorm = currTokens.map((t) => t.norm);
-
-  if (prevNorm.join(" ") === currNorm.join(" ")) {
-    return "";
-  }
-
-  let prefix = 0;
-  const maxPrefix = Math.min(prevNorm.length, currNorm.length);
-  while (prefix < maxPrefix && prevNorm[prefix] === currNorm[prefix]) {
-    prefix += 1;
-  }
-
-  if (prefix > 0 && currNorm.length >= prevNorm.length) {
-    return currTokens.slice(prefix).map((t) => t.raw).join(" ").trim();
-  }
-
-  let overlap = 0;
-  const maxOverlap = Math.min(60, prevNorm.length, currNorm.length);
-  for (let size = maxOverlap; size >= 1; size -= 1) {
-    let same = true;
-    for (let j = 0; j < size; j += 1) {
-      if (prevNorm[prevNorm.length - size + j] !== currNorm[j]) {
-        same = false;
-        break;
-      }
-    }
-    if (same) {
-      overlap = size;
-      break;
-    }
-  }
-
-  if (overlap > 0) {
-    return currTokens.slice(overlap).map((t) => t.raw).join(" ").trim();
-  }
-
-  return currTokens.map((t) => t.raw).join(" ").trim();
-}
-
-function appendDictatedTextUnique(chunk) {
-  const rawChunk = (chunk || "").trim();
-  if (!rawChunk) {
-    return { ok: false, reason: "empty" };
-  }
-
-  const normalizedChunk = normalizeDictationText(rawChunk);
-  if (!normalizedChunk) {
-    return { ok: false, reason: "normalized-empty" };
-  }
-
-  const now = Date.now();
-  const isRecentDuplicate = normalizedChunk === lastDictationFinalNorm && now - lastDictationFinalAt < 3000;
-  if (isRecentDuplicate) {
-    return { ok: false, reason: "same-recent" };
-  }
-
-  const currentRaw = getDictationComposedText();
-  const tailNormalized = normalizeDictationText(currentRaw.slice(-1600));
-  const normalizedWordCount = normalizedChunk.split(" ").filter(Boolean).length;
-  if (tailNormalized.endsWith(normalizedChunk)) {
-    return { ok: false, reason: "already-tail" };
-  }
-  if (normalizedWordCount >= 6 && tailNormalized.includes(normalizedChunk)) {
-    return { ok: false, reason: "already-tail-contains" };
-  }
-
-  if (!appendToDictationDraft(rawChunk)) {
-    return { ok: false, reason: "draft-append-failed" };
-  }
-  lastDictationFinalNorm = normalizedChunk;
-  lastDictationFinalAt = now;
-  return { ok: true, reason: "buffered", text: rawChunk };
-}
-
-function initDictationSupport() {
-  const SR = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
-  if (!SR) {
-    if (dictateBtn) {
-      dictateBtn.disabled = true;
-    }
-    if (dictationMeta) {
-      dictationMeta.textContent = "Dettatura non supportata da questo browser.";
-    }
-    pushDictationDebug("init", "SpeechRecognition non supportato");
-    return;
-  }
-
-  dictationRecognition = new SR();
-  dictationRecognition.lang = "it-IT";
-  dictationRecognition.continuous = true;
-  dictationRecognition.interimResults = true;
-
-  dictationRecognition.onstart = () => {
-    dictationStopping = false;
-    dictationActive = true;
-    armDictationDraftTimer();
-    syncWakeLock("dictation-start").catch(() => {
-    });
-    pushDictationDebug("start", "microfono attivo");
-    renderDictationState();
-  };
-
-  dictationRecognition.onresult = (event) => {
-    const finalCandidates = [];
-    const interimChunks = [];
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
-      const result = event.results[i];
-      const piece = result?.[0]?.transcript?.trim() || "";
-      if (!piece) {
-        continue;
-      }
-
-      if (result.isFinal) {
-        finalCandidates.push({ idx: i, piece });
-      } else {
-        interimChunks.push(piece);
-      }
-    }
-
-    if (finalCandidates.length > 0) {
-      let best = finalCandidates[0];
-      let bestTokenCount = countDictationTokens(best.piece);
-      for (let i = 1; i < finalCandidates.length; i += 1) {
-        const candidate = finalCandidates[i];
-        const tokenCount = countDictationTokens(candidate.piece);
-        if (tokenCount > bestTokenCount || (tokenCount === bestTokenCount && candidate.piece.length > best.piece.length)) {
-          best = candidate;
-          bestTokenCount = tokenCount;
-        }
-      }
-
-      const pendingNorm = normalizeDictationText(dictationPendingFinalRaw);
-      const bestNorm = normalizeDictationText(best.piece);
-      if (bestNorm && bestNorm !== pendingNorm) {
-        dictationPendingFinalRaw = best.piece;
-        pushDictationDebug("final-candidate", `idx=${best.idx} text="${best.piece.slice(0, 80)}"`);
-      } else {
-        pushDictationDebug("final-skip", `idx=${best.idx} same-pending`);
-      }
-      renderDictationState();
-      return;
-    }
-
-    if (interimChunks.length === 0) {
-      pushDictationDebug("result", `vuoto resultIndex=${event.resultIndex}`);
-    }
-    const interimText = interimChunks.join(" ").trim();
-    if (interimText) {
-      pushDictationDebug("interim", interimText.slice(0, 80));
-      renderDictationState(`Dettatura: ${interimText.trim()}`);
-      return;
-    }
-    renderDictationState();
-  };
-
-  dictationRecognition.onerror = (event) => {
-    dictationActive = false;
-    const errorCode = event?.error || "";
-    pushDictationDebug("error", errorCode || "unknown");
-    if (errorCode === "not-allowed" || errorCode === "service-not-allowed" || errorCode === "audio-capture") {
-      flushDictationDraftToInput("error-terminal");
-      clearDictationDraftTimer();
-      dictationRequested = false;
-      dictationStopping = false;
-      dictationLastFinalRaw = "";
-      dictationPendingFinalRaw = "";
-      dictationDraftBuffer = "";
-      syncWakeLock("dictation-error").catch(() => {
-      });
-      renderDictationState("Microfono non autorizzato.");
-      return;
-    }
-    if (errorCode === "aborted" && dictationStopping) {
-      return;
-    }
-    if ((errorCode === "no-speech" || errorCode === "network") && dictationRequested) {
-      renderDictationState("Dettatura in corso...");
-      return;
-    }
-    if (errorCode === "aborted" && !dictationRequested) {
-      renderDictationState();
-      return;
-    }
-    renderDictationState("Errore dettatura.");
-  };
-
-  dictationRecognition.onend = () => {
-    dictationActive = false;
-
-    if (dictationPendingFinalRaw) {
-      const pendingNormalized = normalizeDictationText(dictationPendingFinalRaw);
-      const committedNormalized = normalizeDictationText(dictationLastFinalRaw);
-      if (pendingNormalized && pendingNormalized !== committedNormalized) {
-        let incremental = deriveIncrementFromFinal(dictationLastFinalRaw, dictationPendingFinalRaw);
-        if (!incremental) {
-          incremental = dictationPendingFinalRaw;
-        }
-        const outcome = appendDictatedTextUnique(incremental);
-        pushDictationDebug(
-          "final-commit",
-          `inc="${(incremental || "").slice(0, 80)}" ${outcome.ok ? "ok" : `skip:${outcome.reason}`} full="${dictationPendingFinalRaw.slice(0, 80)}"`
-        );
-        dictationLastFinalRaw = dictationPendingFinalRaw;
-      } else {
-        pushDictationDebug("final-commit-skip", "same-as-committed");
-      }
-      dictationPendingFinalRaw = "";
-    }
-
-    if (dictationRequested && !dictationStopping) {
-      dictationRestartAttempt += 1;
-      pushDictationDebug("end", `riavvio tentativo=${dictationRestartAttempt}`);
-      renderDictationState("Dettatura in corso...");
-      setTimeout(() => {
-        if (!dictationRequested || dictationActive) {
-          return;
-        }
-        try {
-          dictationRecognition.start();
-          pushDictationDebug("restart", "ok");
-        } catch {
-          dictationRestartFailures += 1;
-          pushDictationDebug("restart", `fail #${dictationRestartFailures}`);
-          if (dictationRestartFailures >= 3) {
-            flushDictationDraftToInput("restart-fail");
-            clearDictationDraftTimer();
-            dictationRequested = false;
-            dictationStopping = false;
-            dictationDraftBuffer = "";
-            renderDictationState("Riavvio dettatura fallito. Premi Detta.");
-            return;
-          }
-          renderDictationState("Dettatura in corso...");
-        }
-      }, 350);
-      return;
-    }
-
-    flushDictationDraftToInput(dictationStopping ? "stop" : "session-end");
-    clearDictationDraftTimer();
-    dictationRequested = false;
-    dictationStopping = false;
-    dictationLastFinalRaw = "";
-    dictationPendingFinalRaw = "";
-    dictationDraftBuffer = "";
-    syncWakeLock("dictation-end").catch(() => {
-    });
-    pushDictationDebug("end", "sessione chiusa");
-    renderDictationState();
-  };
-
-  pushDictationDebug("init", "SpeechRecognition attivo");
-  renderDictationState();
-}
-
-function toggleDictation() {
-  if (!dictationRecognition) {
-    return;
-  }
-  if (dictationActive || dictationRequested) {
-    dictationRequested = false;
-    dictationStopping = true;
-    clearDictationDraftTimer();
-    pushDictationDebug("stop-click", "richiesta stop");
-    try {
-      dictationRecognition.abort();
-    } catch {
-      dictationRecognition.stop();
-    }
-    renderDictationState("Dettatura in arresto...");
-    return;
-  }
-  try {
-    dictationRequested = true;
-    dictationStopping = false;
-    dictationLastFinalRaw = "";
-    dictationPendingFinalRaw = "";
-    dictationDraftBuffer = "";
-    clearDictationDraftTimer();
-    lastDictationFinalNorm = "";
-    lastDictationFinalAt = 0;
-    dictationRestartAttempt = 0;
-    dictationRestartFailures = 0;
-    pushDictationDebug("start-click", "richiesta start");
-    dictationRecognition.start();
-  } catch {
-    dictationRequested = false;
-    dictationStopping = false;
-    pushDictationDebug("start-click", "fallita");
-    renderDictationState("Impossibile avviare la dettatura.");
-  }
-}
-
-function waitMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function stopDictationAndCommit(reason = "manual", timeoutMs = 1800) {
-  const hasPending =
-    Boolean(dictationActive) ||
-    Boolean(dictationRequested) ||
-    Boolean(dictationPendingFinalRaw) ||
-    Boolean(dictationDraftBuffer);
-
-  if (!hasPending) {
-    return;
-  }
-
-  if (dictationRecognition && (dictationActive || dictationRequested)) {
-    dictationRequested = false;
-    dictationStopping = true;
-    clearDictationDraftTimer();
-    pushDictationDebug("stop", `richiesta ${reason}`);
-    try {
-      dictationRecognition.abort();
-    } catch {
-      dictationRecognition.stop();
-    }
-  }
-
-  const start = Date.now();
-  while (dictationActive && Date.now() - start < timeoutMs) {
-    // attende onend per committare l'ultimo segmento nel buffer
-    // prima di riversarlo nella textarea.
-    await waitMs(60);
-  }
-
-  if (dictationActive) {
-    pushDictationDebug("stop-timeout", `${reason} timeout=${timeoutMs}ms`);
-  }
-
-  flushDictationDraftToInput(`${reason}-final`);
-  clearDictationDraftTimer();
-  await syncWakeLock(`stop-${reason}`);
-}
-
 async function handleSessionPassphraseClick() {
   if (sessionPassphrase) {
     clearSessionPassphrase();
@@ -1270,8 +640,6 @@ async function exportIncrementalBackup() {
   }
 }
 async function submitNewNote() {
-  await stopDictationAndCommit("submit");
-
   const text = noteInput.value.trim();
   if (!text) {
     return;
@@ -1408,7 +776,7 @@ function buildManageLabelRow(label) {
   left.textContent = `#${label.name}`;
 
   const right = document.createElement("div");
-  right.className = "row gap";
+  right.className = "row gap label-actions";
 
   if (protectedLabelIds.has(label.id)) {
     const pill = document.createElement("span");
@@ -1419,7 +787,7 @@ function buildManageLabelRow(label) {
 
   const toggleBtn = document.createElement("button");
   toggleBtn.type = "button";
-  toggleBtn.className = "btn ghost";
+  toggleBtn.className = "btn ghost label-action-btn";
   toggleBtn.textContent = protectedLabelIds.has(label.id) ? "Rimuovi protezione" : "Proteggi";
   toggleBtn.addEventListener("click", async () => {
     if (protectedLabelIds.has(label.id)) {
@@ -1443,14 +811,14 @@ function buildManageLabelRow(label) {
 
   const encryptExistingBtn = document.createElement("button");
   encryptExistingBtn.type = "button";
-  encryptExistingBtn.className = "btn ghost";
+  encryptExistingBtn.className = "btn ghost label-action-btn";
   encryptExistingBtn.textContent = "Cifra esistenti";
   encryptExistingBtn.disabled = !protectedLabelIds.has(label.id);
   encryptExistingBtn.addEventListener("click", () => encryptExistingNotesForLabel(label));
 
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
-  deleteBtn.className = "btn danger";
+  deleteBtn.className = "btn danger label-action-btn";
   deleteBtn.textContent = "Elimina";
   deleteBtn.addEventListener("click", () => deleteLabel(label));
 
