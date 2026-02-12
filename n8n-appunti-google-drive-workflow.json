@@ -1,0 +1,126 @@
+{
+    "name":  "Appunti PWA - Save Backup JSON to Google Drive (Encrypted Friendly)",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "appunti-backup-drive",
+                                         "responseMode":  "responseNode",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "1",
+                      "name":  "Webhook Appunti",
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2,
+                      "position":  [
+                                       220,
+                                       320
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const envelope = $json || {};\n// In alcune versioni/config di Webhook n8n il body arriva annidato in $json.body\nconst body = (envelope.body \u0026\u0026 typeof envelope.body === \"object\") ? envelope.body : envelope;\n\n// Supporta anche il pulsante Test webhook della webapp\nif (body.event === \"test\") {\n  const ts = new Date().toISOString().replace(/[:.]/g, \"-\");\n  const fileName = `appunti-webhook-test-${ts}.json`;\n  const content = JSON.stringify(body, null, 2);\n\n  return [{\n    json: {\n      storageMode: \"test\",\n      fileName,\n      noteCount: 0,\n      encryptedStored: false,\n    },\n    binary: {\n      data: {\n        data: Buffer.from(content, \"utf8\").toString(\"base64\"),\n        mimeType: \"application/json\",\n        fileName,\n      },\n    },\n  }];\n}\n\nconst isN8nEncrypted = (\n  body.event === \"backup.export\" \u0026\u0026\n  body.encrypted === true \u0026\u0026\n  typeof body.cipherText === \"string\" \u0026\u0026\n  typeof body.iv === \"string\" \u0026\u0026\n  typeof body.salt === \"string\"\n);\n\nconst isN8nPlain = (\n  body.event === \"backup.export\" \u0026\u0026\n  body.encrypted === false \u0026\u0026\n  body.data \u0026\u0026\n  Array.isArray(body.data.notes)\n);\n\nconst isDirectBackup = Array.isArray(body.notes);\n\nlet payloadToStore;\nlet storageMode;\nlet noteCount = 0;\n\nif (isN8nEncrypted) {\n  payloadToStore = body;\n  storageMode = \"encrypted-raw\";\n  noteCount = Number(body.meta?.noteCount || 0);\n} else if (isN8nPlain) {\n  payloadToStore = body.data;\n  storageMode = \"plain-data\";\n  noteCount = Array.isArray(body.data.notes) ? body.data.notes.length : 0;\n} else if (isDirectBackup) {\n  payloadToStore = body;\n  storageMode = \"plain-backup\";\n  noteCount = Array.isArray(body.notes) ? body.notes.length : 0;\n} else {\n  // Fallback robusto: non fallire, salva payload raw per debug/ripristino.\n  payloadToStore = body;\n  storageMode = \"raw-unknown\";\n  noteCount = Number(body?.meta?.noteCount || 0);\n}\n\nconst ts = new Date().toISOString().replace(/[:.]/g, \"-\");\nconst fileName = `appunti-backup-${storageMode}-${ts}.json`;\nconst content = JSON.stringify(payloadToStore, null, 2);\n\nreturn [{\n  json: {\n    storageMode,\n    fileName,\n    noteCount,\n    encryptedStored: storageMode === \"encrypted-raw\",\n  },\n  binary: {\n    data: {\n      data: Buffer.from(content, \"utf8\").toString(\"base64\"),\n      mimeType: \"application/json\",\n      fileName,\n    },\n  },\n}];"
+                                     },
+                      "id":  "2",
+                      "name":  "Prepare JSON File",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       520,
+                                       320
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "resource":  "file",
+                                         "operation":  "upload",
+                                         "binaryData":  true,
+                                         "binaryPropertyName":  "data",
+                                         "parents":  {
+                                                         "__rl":  true,
+                                                         "mode":  "list",
+                                                         "value":  ""
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "3",
+                      "name":  "Google Drive Upload",
+                      "type":  "n8n-nodes-base.googleDrive",
+                      "typeVersion":  3,
+                      "position":  [
+                                       820,
+                                       320
+                                   ],
+                      "credentials":  {
+                                          "googleDriveOAuth2Api":  {
+                                                                       "id":  "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+                                                                       "name":  "Google Drive account"
+                                                                   }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: true, saved: true, storageMode: $json.storageMode || null, encryptedStored: $json.encryptedStored || false, fileName: $json.name || $json.fileName || null, fileId: $json.id || null, webViewLink: $json.webViewLink || null } }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "4",
+                      "name":  "Respond OK",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       1120,
+                                       320
+                                   ]
+                  }
+              ],
+    "connections":  {
+                        "Webhook Appunti":  {
+                                                "main":  [
+                                                             [
+                                                                 {
+                                                                     "node":  "Prepare JSON File",
+                                                                     "type":  "main",
+                                                                     "index":  0
+                                                                 }
+                                                             ]
+                                                         ]
+                                            },
+                        "Prepare JSON File":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "Google Drive Upload",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "Google Drive Upload":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Respond OK",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                }
+                    },
+    "pinData":  {
+
+                },
+    "settings":  {
+                     "executionOrder":  "v1"
+                 },
+    "active":  false,
+    "versionId":  "00000000-0000-0000-0000-000000000003"
+}

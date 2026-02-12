@@ -14,7 +14,6 @@ Funzioni:
 - paginazione: primi 100 risultati + "Carica altri 100"
 - backup/import JSON
 - invio backup verso webhook n8n (chiaro o cifrato)
-- opzione keep-awake durante dettatura (quando supportato da browser/HTTPS)
 - PWA installabile con uso offline
 - archivio principale su IndexedDB (piu adatto a molti dati)
 - migrazione automatica da localStorage alla prima apertura
@@ -35,6 +34,7 @@ Se attivi `Invia solo le note filtrate`, il payload contiene solo i risultati co
 Workflow pronto:
 - vedi `N8N_WORKFLOW.md` per configurazione completa (plain + cifrato).
 - import diretto: `n8n-appunti-backup-workflow.json`
+- salvataggio su Google Drive: `n8n-appunti-google-drive-workflow.json`
 - se usi invio cifrato, imposta in n8n la variabile ambiente `APPUNTI_PASSPHRASE`.
 
 ## Avvio senza Python (PowerShell)

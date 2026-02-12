@@ -1,135 +1,111 @@
-# n8n workflow pronto (backup Appunti PWA)
+# n8n + Google Drive (pronto da importare)
 
-Questa guida riceve il JSON inviato dal pulsante `Invia JSON` della webapp.
-Gestisce sia payload in chiaro che payload cifrato.
+Workflow pronto:
 
-## 1) Crea workflow in n8n
+- `n8n-appunti-google-drive-workflow.json`
 
-Nodi consigliati:
+Obiettivo:
 
-1. `Webhook` (trigger)
-2. `IF encrypted?`
-3. `Code - Parse Plain` (ramo `false`)
-4. `Code - Decrypt Encrypted` (ramo `true`)
-5. `Merge` (modalita `Append`)
-6. `Respond to Webhook`
+1. ricevere il JSON dalla webapp (`Invia JSON`);
+2. salvarlo su Google Drive;
+3. se il payload arriva cifrato, salvarlo cifrato (raw) per re-importarlo poi nella webapp.
 
-## 2) Configura Webhook
+---
 
+## 1) Importa il workflow in n8n
+
+1. Apri n8n.
+2. `Workflows` -> `Import from File`.
+3. Seleziona `n8n-appunti-google-drive-workflow.json`.
+4. Salva il workflow.
+
+---
+
+## 2) Configura Google Drive
+
+Nel nodo `Google Drive Upload`:
+
+1. crea/seleziona credenziale `Google Drive OAuth2`;
+2. autorizza il tuo account Google;
+3. opzionale: scegli cartella Drive (campo `parents`).
+
+Nota:
+- nel JSON c'e un placeholder `REPLACE_WITH_YOUR_CREDENTIAL_ID`, e normale.
+
+---
+
+## 3) Attiva webhook e prendi URL
+
+Nel nodo `Webhook Appunti`:
+
+- Path: `appunti-backup-drive`
 - Metodo: `POST`
-- Path: ad esempio `appunti-backup`
-- Response: usa `Respond to Webhook` node
 
-L'URL finale lo incolli nella webapp, sezione `Automazioni n8n`.
+Attiva il workflow e copia il `Production URL`.
 
-## 3) Nodo IF `encrypted?`
+---
 
-Condizione booleana:
+## 4) Configura la webapp
 
-- Left value: `{{ $json.encrypted }}`
-- Operation: `is true`
+In app:
 
-## 4) Nodo Code (ramo false): `Code - Parse Plain`
+1. `Automazioni n8n`
+2. abilita integrazione
+3. incolla URL webhook
+4. se vuoi file cifrato su Drive, abilita `Cifra il JSON prima dell'invio`
+5. `Salva webhook`
+6. `Invia JSON`
 
-```javascript
-const body = $json;
-const data = body.data ?? body;
+---
 
-return [
-  {
-    json: {
-      event: body.event ?? "backup.export",
-      mode: body.mode ?? { encryptJson: false, onlyFiltered: false },
-      meta: body.meta ?? null,
-      data,
-    },
-  },
-];
-```
+## 5) Cosa salva su Drive
 
-## 5) Nodo Code (ramo true): `Code - Decrypt Encrypted`
+Il workflow gestisce 3 casi:
 
-Prima imposta una variabile ambiente in n8n:
+1. `backup.export` cifrato -> salva il payload raw cifrato (`encrypted-raw`).
+2. `backup.export` in chiaro -> salva il backup puro (`plain-data`).
+3. backup JSON diretto -> salva il JSON così com'e (`plain-backup`).
 
-- `APPUNTI_PASSPHRASE` = la passphrase usata in app quando invii JSON cifrato
+Nome file automatico:
 
-Codice:
+- `appunti-backup-<modalita>-<timestamp>.json`
 
-```javascript
-const crypto = require("crypto");
+---
 
-function b64(input) {
-  return Buffer.from(input, "base64");
-}
+## 6) Come reimportare in app
 
-const body = $json;
-const passphrase = $env.APPUNTI_PASSPHRASE;
+1. scarica il file da Drive;
+2. in webapp: `Backup -> Importa JSON`.
 
-if (!passphrase) {
-  throw new Error("Variabile APPUNTI_PASSPHRASE non impostata in n8n");
-}
+Se il file e cifrato raw:
 
-if (!body.cipherText || !body.iv || !body.salt) {
-  throw new Error("Payload cifrato incompleto");
-}
+- la webapp rileva `encrypted:true`, chiede passphrase e decifra in import.
 
-const salt = b64(body.salt);
-const iv = b64(body.iv);
-const encryptedWithTag = b64(body.cipherText);
+---
 
-// Compatibile con app.js: PBKDF2 SHA-256, 150000 iterazioni, chiave 32 byte
-const key = crypto.pbkdf2Sync(passphrase, salt, 150000, 32, "sha256");
+## 7) Risposta webhook
 
-// In WebCrypto AES-GCM, il tag (16 byte) e' accodato al ciphertext
-const tag = encryptedWithTag.subarray(encryptedWithTag.length - 16);
-const ciphertext = encryptedWithTag.subarray(0, encryptedWithTag.length - 16);
-
-const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-decipher.setAuthTag(tag);
-
-const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-const data = JSON.parse(plain);
-
-return [
-  {
-    json: {
-      event: body.event ?? "backup.export",
-      mode: body.mode ?? { encryptJson: true, onlyFiltered: false },
-      meta: body.meta ?? null,
-      data,
-    },
-  },
-];
-```
-
-## 6) Merge + Respond
-
-- Collega i due nodi `Code` al nodo `Merge`
-- Dal `Merge` vai a `Respond to Webhook`
-- Nel `Respond to Webhook` puoi restituire:
+Il workflow risponde con JSON tipo:
 
 ```json
 {
   "ok": true,
-  "receivedAt": "={{ $now }}",
-  "noteCount": "={{ $json.data.notes.length }}"
+  "saved": true,
+  "storageMode": "encrypted-raw",
+  "encryptedStored": true,
+  "fileName": "appunti-backup-encrypted-raw-....json",
+  "fileId": "...",
+  "webViewLink": "..."
 }
 ```
 
-## 7) Salvataggio dati (opzionale)
+---
 
-Dopo `Merge` puoi aggiungere uno di questi nodi:
+## 8) Troubleshooting rapido
 
-- `Google Drive` (crea file JSON)
-- `Microsoft OneDrive` (crea file JSON)
-- `Postgres` (salva metadati e note)
-- `Notion` / `Airtable` (se preferisci workspace)
-
-## 8) Payload atteso dalla webapp
-
-- `event`: `backup.export`
-- `encrypted`: `true/false`
-- `mode`: `{ encryptJson, onlyFiltered }`
-- `meta`: conteggi/filtri
-- `data`: presente solo in chiaro
-- `cipherText/iv/salt`: presenti solo se cifrato
+- errore upload Drive:
+  - ricontrolla credenziale OAuth e permessi cartella.
+- errore webhook dalla webapp:
+  - URL sbagliato o workflow non attivo.
+- import file cifrato fallisce in app:
+  - passphrase errata rispetto a quella usata in invio.

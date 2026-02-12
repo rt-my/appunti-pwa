@@ -468,7 +468,38 @@ async function sendJsonToN8n() {
       statusPill.textContent = `Invio JSON n8n fallito: HTTP ${response.status}`;
       return;
     }
-    statusPill.textContent = `JSON inviato a n8n (${dataMeta.noteCount} note${onlyFiltered ? " filtrate" : ""})`;
+
+    let responseBody = null;
+    try {
+      responseBody = await response.json();
+    } catch {
+      responseBody = null;
+    }
+
+    const baseMessage = `JSON inviato a n8n (${dataMeta.noteCount} note${onlyFiltered ? " filtrate" : ""})`;
+    if (!responseBody || typeof responseBody !== "object") {
+      statusPill.textContent = baseMessage;
+      return;
+    }
+
+    const parts = [baseMessage];
+    if (typeof responseBody.fileName === "string" && responseBody.fileName.trim()) {
+      parts.push(`file: ${responseBody.fileName.trim()}`);
+    }
+    if (typeof responseBody.storageMode === "string" && responseBody.storageMode.trim()) {
+      parts.push(`modo: ${responseBody.storageMode.trim()}`);
+    }
+    if (typeof responseBody.savedAt === "string" && responseBody.savedAt.trim()) {
+      const stamp = new Date(responseBody.savedAt);
+      if (!Number.isNaN(stamp.getTime())) {
+        const localStamp = new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "medium" }).format(stamp);
+        parts.push(`salvato: ${localStamp}`);
+      } else {
+        parts.push(`salvato: ${responseBody.savedAt.trim()}`);
+      }
+    }
+
+    statusPill.textContent = parts.join(" | ");
   } catch {
     statusPill.textContent = "Invio JSON n8n fallito: webhook non raggiungibile";
   }
