@@ -1004,6 +1004,33 @@ function shouldHideProtectedItems() {
   return !sessionPassphrase && Boolean(hideEncryptedNotesCheckbox?.checked);
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getHighlightedNoteHtml(text, query) {
+  const rawText = String(text || "");
+  const rawQuery = String(query || "").trim();
+  if (!rawQuery) {
+    return escapeHtml(rawText);
+  }
+
+  const regex = new RegExp(`(${escapeRegExp(rawQuery)})`, "gi");
+  const parts = rawText.split(regex);
+  return parts
+    .map((part, index) => (index % 2 === 1 ? `<mark class="note-highlight">${escapeHtml(part)}</mark>` : escapeHtml(part)))
+    .join("");
+}
+
 function getFilteredNotes() {
   const textQuery = searchInput.value.trim().toLowerCase();
   const dateFrom = dateFromInput.value ? new Date(`${dateFromInput.value}T00:00:00`).getTime() : null;
@@ -1312,13 +1339,14 @@ function renderNoteItem(note) {
   const pinBtn = fragment.querySelector(".pin-btn");
   const editBtn = fragment.querySelector(".edit-btn");
   const deleteBtn = fragment.querySelector(".delete-btn");
+  const rawSearchQuery = searchInput.value.trim();
 
   if (note.encrypted && sessionPassphrase && decryptedNoteTextIndex.has(note.id)) {
-    noteText.textContent = decryptedNoteTextIndex.get(note.id) || "";
+    noteText.innerHTML = getHighlightedNoteHtml(decryptedNoteTextIndex.get(note.id) || "", rawSearchQuery);
   } else if (note.encrypted) {
     noteText.textContent = "Nota criptata. Apri la sessione con Password per vedere il testo.";
   } else {
-    noteText.textContent = note.text;
+    noteText.innerHTML = getHighlightedNoteHtml(note.text, rawSearchQuery);
   }
 
   noteMeta.textContent = buildMetaText(note);
