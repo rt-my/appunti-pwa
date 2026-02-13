@@ -27,6 +27,8 @@ h2{margin:0 0 10px;font-size:1rem}
 .note-top{display:flex;justify-content:space-between;gap:8px}.note-text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.note-actions{display:flex;gap:6px}
 .note-meta{color:var(--muted);font-size:.8rem;margin-top:8px}.note-labels{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.tag{border-radius:999px;font-size:.75rem;padding:4px 8px;background:#eaf1f4;color:#304149}
 .edit-box{display:grid;gap:8px}
+.edit-textarea{min-height:240px}
+@media (max-width:640px){.edit-textarea{min-height:48vh}}
 @media (max-width:640px){.note-top{flex-direction:column}.note-actions{align-self:flex-end}}
 
 .loading-item{padding:10px;text-align:center;color:var(--muted);font-size:.9rem}

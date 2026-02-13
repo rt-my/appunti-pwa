@@ -1387,7 +1387,7 @@ function enterEditMode(item, note) {
   editor.className = "edit-box";
 
   const textarea = document.createElement("textarea");
-  textarea.className = "textarea";
+  textarea.className = "textarea edit-textarea";
   textarea.value = note.text || "";
 
   const selector = document.createElement("div");
